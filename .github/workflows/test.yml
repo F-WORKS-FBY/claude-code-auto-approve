@@ -1,0 +1,53 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.x"]
+        include:
+          # README 写的是 3.8+，最低版本固定在还提供 3.8 的系统镜像上跑
+          - { os: ubuntu-22.04, python: "3.8" }
+          - { os: windows-2022, python: "3.8" }
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Hook rules
+        run: python tests/test_hook.py
+
+      - name: Installer
+        run: python tests/test_install.py
+
+      - name: Install end-to-end into a temp config dir
+        run: python install.py --config-dir "${{ runner.temp }}/claude" --mode on
+
+      # 下面两步就是 README「排查」里的命令，只是把 ~/.claude 换成了上一步装到的临时目录
+      - name: README troubleshooting command (bash)
+        shell: bash
+        run: |
+          python install.py --config-dir "$RUNNER_TEMP/claude" --mode dryrun
+          out=$(echo '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | AUTO_APPROVE_MODE_FILE=/nonexistent AUTO_APPROVE_LOG=/dev/null python "$RUNNER_TEMP/claude/hooks/auto-approve.py")
+          echo "$out"
+          grep -q '"allow"' <<<"$out"
+
+      - name: README troubleshooting command (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:AUTO_APPROVE_MODE_FILE = "$env:TEMP\nonexistent"; $env:AUTO_APPROVE_LOG = "NUL"
+          $out = '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | python "$env:RUNNER_TEMP\claude\hooks\auto-approve.py"
+          Remove-Item Env:AUTO_APPROVE_MODE_FILE, Env:AUTO_APPROVE_LOG
+          $out
+          if ($out -notmatch '"allow"') { exit 1 }
