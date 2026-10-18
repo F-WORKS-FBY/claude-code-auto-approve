@@ -66,6 +66,27 @@ APPROVE = [
     (bash("rg -n 'DROP TABLE' migrations/"), "rg 搜 DROP TABLE"),
     (bash("B=/x/claude.exe; dd if=$B bs=1 skip=100 count=700 2>/dev/null | tr -c '[:print:]' '.'"), "dd 只读"),
     (bash("dd if=/dev/zero of=/dev/null bs=1M count=100"), "dd 写到 /dev/null"),
+    # sudo 只是借 root 权限查看（Linux / macOS / Windows 的 sudo、doas、gsudo）
+    (bash("""sudo -n docker ps -a --format '{{.Names}}\\t{{.Status}}\\t{{.Label "com.docker.compose.project"}}' 2>&1; """
+          """sudo -n docker volume ls --format '{{.Name}}' 2>&1 | head -20; """
+          """sudo -n docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' 2>&1 | head -20; """
+          """grep -nE '^name:|5432|6379' /data/app/infra/docker-compose.yml 2>/dev/null | head"""), "sudo 看容器、卷、镜像"),
+    (bash("sudo -n ufw status 2>&1 | head -5; sudo -n docker info --format '{{.DockerRootDir}}' 2>&1; ss -ltn | grep -E '0.0.0.0|\\*:'"),
+     "sudo 看防火墙和 docker info"),
+    (bash("sudo -n docker ps -a 2>&1 | head -20; echo ---; ss -ltnp 2>/dev/null | awk 'NR>1{print $4}' | sort -u"), "sudo docker ps + ss"),
+    (bash("sudo podman ps -a && sudo nerdctl images && sudo crictl ps"), "sudo 看 podman / nerdctl / crictl"),
+    (bash("sudo docker compose ps && sudo docker compose logs --tail 50 web"), "sudo docker compose ps / logs"),
+    (bash("sudo systemctl status nginx && sudo journalctl -u nginx --since today"), "sudo 看服务状态和日志"),
+    (bash("sudo ss -ltnp; sudo lsof -i :443; sudo netstat -tlnp"), "sudo 看端口"),
+    (bash("sudo iptables -nvL; sudo iptables -t nat -S; sudo nft list ruleset; sudo firewall-cmd --list-all"), "sudo 看防火墙规则"),
+    (bash("sudo tail -n 100 /var/log/syslog && sudo du -sh /var/lib/docker && sudo dmesg | tail"), "sudo 看日志和磁盘"),
+    (bash("sudo grep -r error /var/log/nginx"), "sudo grep 只读"),
+    (bash("sudo -u postgres ls /var/lib/postgresql"), "sudo -u 某用户 ls"),
+    (bash("sudo /usr/bin/docker ps"), "sudo 完整路径的 docker ps"),
+    (bash("sudo lsof -iTCP -sTCP:LISTEN; sudo launchctl list; sudo pfctl -s rules; sudo log show --last 5m"), "macOS：sudo 查看"),
+    (bash("doas docker ps"), "doas 只读"),
+    (ps("sudo netstat -ano"), "Windows：sudo netstat"),
+    (ps("gsudo Get-Service"), "Windows：gsudo Get-Service"),
     # 只看工具类型的
     (("Bash", {"command": "ls", "description": "no sudo needed"}), "说明里提到 sudo"),
     (("Edit", {"file_path": "/home/ubuntu/a.py", "old_string": "x", "new_string": "sudo rm -rf /"}), "编辑内容不查黑名单"),
@@ -118,8 +139,29 @@ LEAVE = [
     (bash("git -C /repo stash drop"), "git -C stash drop"),
     # 系统、数据库、集群、发布
     (bash("sudo apt install x"), "sudo"),
-    (bash("sudo grep x /root/secret"), "sudo grep 不算搜索"),
-    (bash("grep foo $(sudo cat /etc/shadow)"), "搜索里带 $(...)"),
+    (bash("echo 127.0.0.1 x | sudo tee -a /etc/hosts"), "sudo tee 写文件"),
+    (bash("grep foo $(sudo tee /etc/x < y)"), "搜索里带 $(...)"),
+    (bash("sudo docker rm -f web"), "sudo docker rm"),
+    (bash("sudo docker exec web sh"), "sudo docker exec"),
+    (bash("sudo docker compose up -d"), "sudo docker compose up"),
+    (bash("sudo podman rm x"), "sudo podman rm"),
+    (bash("sudo systemctl restart nginx"), "sudo systemctl restart"),
+    (bash("sudo journalctl --vacuum-time=1d"), "sudo journalctl --vacuum"),
+    (bash("sudo dmesg -C"), "sudo dmesg -C 清空"),
+    (bash("sudo iptables -F"), "sudo iptables -F 清空"),
+    (bash("sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT"), "sudo iptables -A"),
+    (bash("sudo ufw allow 22"), "sudo ufw allow"),
+    (bash("sudo nft flush ruleset"), "sudo nft flush"),
+    (bash("sudo -u postgres psql -c 'select 1'"), "sudo -u postgres psql"),
+    (bash("sudo bash -c 'docker ps'"), "sudo bash -c"),
+    (bash("sudo -i"), "sudo -i 开 root shell"),
+    (bash("sudo -p ls rm -rf /x/y/z"), "sudo 带参数伪装成 ls"),
+    (bash("sudo docker ps; sudo rm -f /var/log/x.log"), "只读 sudo 后面跟写的 sudo"),
+    (bash("sudo docker ps -q | xargs sudo docker rm"), "管道后面的 sudo docker rm"),
+    (bash("doas rm /etc/x"), "doas"),
+    (bash("pkexec rm /etc/x"), "pkexec"),
+    (ps("gsudo Remove-Item C:\\x"), "gsudo（Windows）"),
+    (ps("Start-Process powershell -Verb RunAs"), "以管理员身份运行"),
     (bash("mkfs.ext4 /dev/vdb"), "mkfs"),
     (bash("dd if=/dev/zero of=/dev/vda"), "dd 写盘"),
     (bash("dd bs=4M if=ubuntu.iso of=/dev/sdb status=progress"), "dd 参数顺序不同"),
@@ -237,7 +279,7 @@ LEAVE = [
 MODES = [
     ("plan", "Write", {"file_path": "/home/u/a.py", "content": "x"}, True, "plan 模式：写文件照常放行"),
     ("plan", "Bash", {"command": "ls"}, True, "plan 模式：跑命令照常放行"),
-    ("plan", "Bash", {"command": "sudo ls"}, False, "plan 模式：黑名单照常生效"),
+    ("plan", "Bash", {"command": "sudo apt install x"}, False, "plan 模式：黑名单照常生效"),
     ("plan", "ExitPlanMode", {"plan": "1. 改 a.py"}, False, "plan 模式：方案确认留给你"),
     ("auto", "Bash", {"command": "ls"}, False, "auto 模式：命令交给 auto 模式"),
     ("auto", "Edit", {"file_path": "/home/u/a.py", "old_string": "a", "new_string": "b"}, True, "auto 模式：改文件"),
@@ -245,8 +287,43 @@ MODES = [
     ("acceptEdits", "Bash", {"command": "ls"}, True, "acceptEdits 模式：跑命令"),
 ]
 
+# Windows 的 C 盘：(平台, 工具, 参数, 当前目录, 是否放行, 说明)
+C_PROJ, D_WORK = "C:\\Users\\me\\proj", "D:\\work"
+DRIVES = [
+    ("windows", "Bash", {"command": "npm install"}, C_PROJ, False, "C 盘目录里装依赖"),
+    ("windows", "Bash", {"command": "git status && git log --oneline -5"}, C_PROJ, True, "C 盘目录里 git 查看"),
+    ("windows", "Bash", {"command": "git commit -m wip"}, C_PROJ, False, "C 盘目录里 git commit"),
+    ("windows", "Bash", {"command": "ls -la && cat README.md | head -20"}, C_PROJ, True, "C 盘目录里看文件"),
+    ("windows", "Bash", {"command": "cat a.txt > /dev/null 2>&1"}, C_PROJ, True, "写到 /dev/null 不算写"),
+    ("windows", "Bash", {"command": "echo hi > notes.txt"}, C_PROJ, False, "C 盘目录里 > 写文件"),
+    ("windows", "Bash", {"command": "mkdir build"}, C_PROJ, False, "C 盘目录里 mkdir"),
+    ("windows", "Bash", {"command": "python script.py"}, C_PROJ, False, "C 盘目录里跑脚本"),
+    ("windows", "Bash", {"command": "ls $(pwd)"}, C_PROJ, False, "带 $(...) 不算只读"),
+    ("windows", "PowerShell", {"command": "Get-ChildItem | Select-Object Name"}, C_PROJ, True, "PowerShell 查看"),
+    ("windows", "PowerShell", {"command": "Get-Content a.txt | Out-File b.txt"}, C_PROJ, False, "PowerShell Out-File 写文件"),
+    ("windows", "PowerShell", {"command": "Set-Content a.txt hi"}, C_PROJ, False, "PowerShell Set-Content"),
+    ("windows", "Bash", {"command": "npm install"}, D_WORK, True, "D 盘目录里装依赖"),
+    ("windows", "Bash", {"command": "cp a.txt C:/Users/me/"}, D_WORK, False, "从 D 盘往 C 盘拷"),
+    ("windows", "Bash", {"command": "rm -f /c/Users/me/tmp/x.log"}, D_WORK, False, "Git Bash 写法的 C 盘"),
+    ("windows", "Bash", {"command": "echo x > ~/notes.txt"}, D_WORK, False, "写到 ~（在 C 盘）"),
+    ("windows", "PowerShell", {"command": "Remove-Item $env:USERPROFILE\\Downloads\\x.zip"}, D_WORK, False, "$env:USERPROFILE（在 C 盘）"),
+    ("windows", "Bash", {"command": "cat C:/Windows/win.ini"}, D_WORK, True, "读 C 盘文件"),
+    ("windows", "Edit", {"file_path": C_PROJ + "\\a.py", "old_string": "a", "new_string": "b"}, C_PROJ, False, "编辑 C 盘文件"),
+    ("windows", "Write", {"file_path": "/c/Users/me/a.txt", "content": "x"}, D_WORK, False, "写 /c/ 下的文件"),
+    ("windows", "Edit", {"file_path": D_WORK + "\\a.py", "old_string": "a", "new_string": "b"}, D_WORK, True, "编辑 D 盘文件"),
+    ("windows", "Read", {"file_path": "C:\\Windows\\win.ini"}, C_PROJ, True, "读 C 盘文件（Read 工具）"),
+    ("windows", "Grep", {"pattern": "x", "path": "C:\\Users\\me"}, C_PROJ, True, "搜 C 盘（Grep 工具）"),
+    ("windows", "mcp__fs__write_file", {"path": "C:\\Users\\me\\x.txt", "content": "x"}, D_WORK, False, "MCP 参数里有 C 盘路径"),
+    ("windows", "mcp__fs__write_file", {"path": "D:\\work\\x.txt", "content": "x"}, D_WORK, True, "MCP 参数里只有 D 盘"),
+    ("wsl", "Bash", {"command": "npm install"}, "/mnt/c/Users/me/proj", False, "WSL：/mnt/c 下装依赖"),
+    ("wsl", "Bash", {"command": "npm install"}, "/home/me/proj", True, "WSL：Linux 目录里装依赖"),
+    ("wsl", "Write", {"file_path": "/mnt/c/Users/me/a.txt", "content": "x"}, "/home/me", False, "WSL：写 /mnt/c 下的文件"),
+    ("posix", "Bash", {"command": "npm install"}, C_PROJ, True, "Linux / macOS 上没有 C 盘规则"),
+]
+WIN_ENV = {"USERPROFILE": "C:\\Users\\me", "HOME": "C:\\Users\\me"}
 
-def run(tool, tool_input, mode="on", raw=None, env_extra=None, event_extra=None):
+
+def run(tool, tool_input, mode="on", raw=None, env_extra=None, event_extra=None, raw_out=False):
     """跑一次钩子，返回 (是否放行, 新增的日志, 退出码)。mode 给 bytes 就原样写进开关文件"""
     if mode is None:
         if os.path.exists(MODE_FILE):
@@ -259,11 +336,14 @@ def run(tool, tool_input, mode="on", raw=None, env_extra=None, event_extra=None)
         "session_id": "11111111-2222", "cwd": os.path.expanduser("~"),
         "hook_event_name": "PermissionRequest", "tool_name": tool, "tool_input": tool_input,
     }, **(event_extra or {})))
-    env = dict(os.environ, AUTO_APPROVE_MODE_FILE=MODE_FILE, AUTO_APPROVE_LOG=LOG_FILE, **(env_extra or {}))
+    env = dict(os.environ, AUTO_APPROVE_MODE_FILE=MODE_FILE, AUTO_APPROVE_LOG=LOG_FILE, AUTO_APPROVE_PLATFORM="posix")
+    env.update(env_extra or {})   # 默认按 Linux / macOS 跑；Windows 的 C 盘规则单独测
     for name in TEST_VARS:
         env.pop(name, None)
     p = subprocess.run([sys.executable, HOOK], input=payload.encode("utf-8"), env=env, capture_output=True)
     out = p.stdout.decode("utf-8")
+    if raw_out:
+        return out
     allowed = bool(out.strip()) and json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == "allow"
     new_log = ""
     if os.path.exists(LOG_FILE):
@@ -293,6 +373,24 @@ def main():
     for permission_mode, tool, tool_input, expect, label in MODES:
         allowed, new_log, _ = run(tool, tool_input, event_extra={"permission_mode": permission_mode})
         check(label, allowed == expect, new_log)
+    print("— Windows 的 C 盘 —")
+    for plat, tool, tool_input, cwd, expect, label in DRIVES:
+        env = dict(WIN_ENV if plat == "windows" else {"HOME": "/home/me"}, AUTO_APPROVE_PLATFORM=plat)
+        allowed, new_log, _ = run(tool, tool_input, env_extra=env, event_extra={"cwd": cwd})
+        check(label, allowed == expect, new_log)
+    print("— Windows 的执行前检查（PreToolUse）—")
+    win = dict(WIN_ENV, AUTO_APPROVE_PLATFORM="windows")
+    pre = {"hook_event_name": "PreToolUse", "cwd": C_PROJ}
+    out = run("Write", {"file_path": C_PROJ + "\\a.txt", "content": "x"}, env_extra=win, event_extra=pre, raw_out=True)
+    check("写 C 盘文件：强制弹窗", '"ask"' in out, out)
+    out = run("Bash", {"command": "git status"}, env_extra=win, event_extra=pre, raw_out=True)
+    check("C 盘里只读：不插手", not out.strip(), out)
+    out = run("Write", {"file_path": D_WORK + "\\a.txt", "content": "x"}, env_extra=win, event_extra=dict(pre, cwd=D_WORK), raw_out=True)
+    check("写 D 盘文件：不插手", not out.strip(), out)
+    out = run("Write", {"file_path": C_PROJ + "\\a.txt", "content": "x"}, mode="off", env_extra=win, event_extra=pre, raw_out=True)
+    check("开关 off：不插手", not out.strip(), out)
+    out = run("Bash", {"command": "rm -rf ~"}, env_extra={"AUTO_APPROVE_PLATFORM": "posix"}, event_extra=pre, raw_out=True)
+    check("Linux / macOS：不插手", not out.strip(), out)
     print("— 开关和异常输入 —")
     allowed, new_log, _ = run(*bash("ls"), mode="off")
     check("off：不放行也不记", not allowed and not new_log)
@@ -315,7 +413,7 @@ def main():
     check("带中文的普通命令", allowed)
 
     print()
-    total = len(APPROVE) + len(LEAVE) + len(MODES) + 9
+    total = len(APPROVE) + len(LEAVE) + len(MODES) + len(DRIVES) + 5 + 9
     if failures:
         print("失败 %d/%d 项：%s" % (len(failures), total, "、".join(failures)))
         return 1

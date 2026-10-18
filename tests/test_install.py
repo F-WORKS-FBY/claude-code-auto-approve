@@ -30,7 +30,8 @@ def fresh(name):
 
 
 def install(cfg, *args, env_extra=None):
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", **(env_extra or {}))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", AUTO_APPROVE_PLATFORM="posix")   # 默认按 Linux / macOS 装
+    env.update(env_extra or {})
     env.pop("CLAUDE_CONFIG_DIR", None)
     p = subprocess.run([sys.executable, INSTALL, "--config-dir", cfg, "--skip-tests"] + list(args),
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
@@ -89,9 +90,28 @@ def case_fresh():
     code, out = install(cfg)
     data = settings(cfg)
     entry = data["hooks"]["PermissionRequest"][0]
-    return (code == 0 and len(ours(data)) == 1 and entry["matcher"] == MATCHER
+    return (code == 0 and len(ours(data)) == 1 and entry["matcher"] == MATCHER and "PreToolUse" not in data["hooks"]
             and os.path.isfile(os.path.join(cfg, "hooks", "auto-approve.py")) and mode(cfg) == "dryrun"
             and "自检通过" in out and "试运行" in out), out
+
+
+def pre_ours(data):
+    return [h["command"] for e in data.get("hooks", {}).get("PreToolUse", [])
+            for h in e.get("hooks", []) if "auto-approve.py" in h.get("command", "")]
+
+
+def case_c_drive_guard(plat):
+    cfg = fresh("c-drive-" + plat)
+    write(os.path.join(cfg, "settings.json"), {"hooks": {"PreToolUse": [GUARD]}})
+    code, out = install(cfg, env_extra={"AUTO_APPROVE_PLATFORM": plat})
+    data = settings(cfg)
+    pre = data["hooks"]["PreToolUse"]
+    registered = (code == 0 and pre[0] == GUARD and len(pre_ours(data)) == 1 and pre[1]["matcher"] == __import__("install").PRE_MATCHER
+                  and "执行前检查" in out and "自检通过" in out)
+    code2, out2 = install(cfg, "--uninstall", env_extra={"AUTO_APPROVE_PLATFORM": plat})
+    data = settings(cfg)
+    removed = code2 == 0 and data["hooks"] == {"PreToolUse": [GUARD]}
+    return registered and removed, out + out2
 
 
 def case_keep_existing():
@@ -326,6 +346,8 @@ CASES = [
     (case_set_mode, "--mode on 切开关"),
     (case_mode_quick, "已装好时 --mode 只切开关、不重装"),
     (case_windows_entry, "Windows 的登记格式（Git Bash / PowerShell）"),
+    (lambda: case_c_drive_guard("windows"), "Windows：登记执行前检查，卸载时摘干净"),
+    (lambda: case_c_drive_guard("wsl"), "WSL：登记执行前检查，卸载时摘干净"),
     (case_mode_off_message, "--mode off 提示是暂停"),
     (case_config_dir_mode_respected, "--config-dir 装的，开关也认"),
     (case_backup_unique, "同一秒两次改动，备份不互相覆盖"),

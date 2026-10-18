@@ -29,6 +29,7 @@ Claude Code 每次要跑命令、改文件，都会弹窗问你一句"可以吗"
 | 读文件、搜代码 | 命中黑名单的命令，比如 `git push -f`、`sudo`、`DROP TABLE` |
 | 查网页、联网搜索 | 危险的删除，比如 `rm -rf ~`、`rm -rf /var/www` |
 | MCP 工具、Skill、Workflow | 要求在沙箱外运行的命令，以及左边没列出的工具 |
+| 借 sudo 查看系统，比如 `sudo docker ps`、`sudo ufw status` | Windows 上涉及 C 盘的操作（只读除外） |
 
 放行只对这一次有效，相当于你点了「1 Yes」，不会替你勾"以后都别问"。完整的黑名单和删除规则见[规则细节](#规则细节)。
 
@@ -42,7 +43,7 @@ cd claude-code-auto-approve
 python3 install.py        # Windows 上是 python install.py
 ```
 
-安装脚本会先跑一遍测试，再把钩子拷到 `~/.claude/hooks/`，然后登记到 `~/.claude/settings.json`。原有的配置不会被改动，有改动时会先备份一份。最后它会把登记好的命令实际跑一遍，确认 Claude Code 能调起来。重复运行也没关系，不会重复登记。
+安装脚本会先跑一遍测试，再把钩子拷到 `~/.claude/hooks/`，然后登记到 `~/.claude/settings.json`。原有的配置不会被改动，有改动时会先备份一份。最后它会把登记好的命令实际跑一遍，确认 Claude Code 能调起来。重复运行也没关系，不会重复登记。在 Windows 上（包括 WSL），它还会多登记一个执行前检查，用来守住 C 盘，见[规则细节](#规则细节)。
 
 > [!TIP]
 > 第一次安装（还没有开关文件时）是**试运行**：只记日志，不放行。在 Claude Code 里随便触发一次授权弹窗，照常点掉，再看 `~/.claude/hooks/auto-approve.log`。里面出现带会话目录的 `[试运行] 会自动确认` 就说明装好了，然后正式开启：
@@ -135,12 +136,31 @@ Claude Code 自带一个 auto 模式，也是为了少打扰你。它的做法�
 - 会改写或删除远程历史的 `git push`：`-f`（包括 `-uf` 这类组合）、`--force`、`--force-with-lease`、`--delete`、`-d`、`--mirror`、`+分支`、`:分支`。普通的 push 放行。
 - `git reset --hard`、`git clean`、`git stash drop`、`git stash clear`。`git clean -n` 只是预览，放行。
 - 上面这些 git 规则，中间夹了 `git -C /某个仓库` 这类参数也照样认得出。
-- `sudo`、`mkfs`、`fdisk`、`parted`、`shutdown`、`reboot`、`poweroff`、`halt`、`chmod 777`（`0777`、`-R`、`-Rv` 都算）
+- 提权：`sudo`、`doas`、`gsudo`（Windows）、`pkexec`，以及 `Start-Process … -Verb RunAs`（Windows 以管理员身份运行）。`sudo`、`doas`、`gsudo` 后面跟的如果只是查看，就放行，见下面的"只读命令"。
+- `mkfs`、`fdisk`、`parted`、`shutdown`、`reboot`、`poweroff`、`halt`、`chmod 777`（`0777`、`-R`、`-Rv` 都算）
 - `dd` 往外写（`of=` 写盘或写镜像文件）。只读取的 `dd`、写到 `/dev/null` 的 `dd` 放行。
 - `DROP` 或 `TRUNCATE` 的 `TABLE` / `DATABASE` / `SCHEMA`
 - `kubectl delete`（前面带 `-n`、`--context` 也算）、`docker rm` / `rmi`、`docker container|image|volume|network|system rm|prune`、`docker compose down -v`
 - `npm` / `pnpm` / `yarn publish`。带 `--dry-run` 的放行，`kubectl delete --dry-run` 同样放行。
 - Windows：`Format-Volume`、`Clear-Disk`、`Stop-Computer`、`Restart-Computer`
+
+**只读命令**：只看不改的命令。`sudo` 后面跟的是这些就放行；Windows 上涉及 C 盘时，也只放行这些。
+
+- 看文件、目录、磁盘：`ls`、`cat`、`head`、`tail`、`grep`、`find`（不带 `-delete`、`-exec`）、`du`、`df`、`stat` 等
+- 看进程、端口、防火墙：`ps`、`ss`、`netstat`、`lsof`、`ufw status`、`iptables -L` / `-S`、`nft list`、`firewall-cmd --list-*`，macOS 的 `pfctl -s`
+- 看服务和日志：`systemctl status`、`journalctl`（清理日志的参数除外）、`dmesg`（不带 `-c`），macOS 的 `launchctl list`、`log show`
+- 看容器：`docker` / `podman` / `nerdctl` 的 `ps`、`images`、`logs`、`inspect`、`info`、`volume ls`、`compose ps` 等，以及 `crictl ps`。不依赖 docker，没装 docker 的机器照样适用
+- `git status`、`git log`、`git diff`、`git show` 这类查询，`npm ls`、`pip list` 这类查询，`xxx --version`
+- PowerShell 的 `Get-*`、`Test-*`、`Select-String`、`Select-Object` 这类命令
+
+带 `-u 用户`、`-n` 这些参数也认得。会改东西的照样拦，比如 `sudo docker rm`、`sudo systemctl restart`、`sudo journalctl --vacuum-time=1d`、`sudo iptables -F`。完整清单在 `auto-approve.py` 的 `READ_ONLY_COMMANDS`。
+
+**Windows 的 C 盘**：在 Windows 上（包括 WSL 里的 `/mnt/c`），只要当前目录在 C 盘，或者命令、文件路径、MCP 参数里涉及 C 盘，除了读，一律要你确认。
+
+- 读文件、搜索放行；Bash / PowerShell 命令每一段都是只读命令，而且没有用 `>` 往文件里写，才放行。
+- 认得这些写法：`C:\…`、`C:/…`、Git Bash 的 `/c/…`、WSL 的 `/mnt/c/…`，以及指向 C 盘的 `~`、`$HOME`、`$env:USERPROFILE`、`%TEMP%` 这类环境变量。
+- 钩子除了接手弹窗，还会登记一个执行前检查（PreToolUse）。所以开着 acceptEdits 模式时，Claude Code 本来不问就会改的项目文件，只要在 C 盘，也会弹窗问你。
+- 不想要这条规则，把 `auto-approve.py` 里的 `PROTECTED_DRIVES = {"C"}` 改成 `set()`，再跑一次 `install.py`。想多保护几个盘，就往里面加盘符。
 
 **删除**：`rm` 不会一律拦下。钩子会先解析出删除目标，只拦删了就无法挽回的那些。
 
@@ -177,6 +197,7 @@ python3 install.py --uninstall
 - 命令里引号括起来的文字也会被当成命令检查，因为它可能是 `bash -c '…'` 要执行的内容。所以 `echo "rm -rf ~"`、提交说明里写了 `git push -f` 这种，也会弹窗，宁可多问一次。
 - 文件编辑和写入不看路径，一律放行，包括 `~/.claude/settings.json`、`~/.bashrc`、`.git/` 下的文件，以及这个钩子自己的开关文件。Claude Code 对这类敏感文件自带的确认弹窗，也会被放行。如果你在意，可以在 `settings.json` 的 `permissions.deny` 里禁止改这些文件。
 - MCP 工具一律放行，只要参数没命中黑名单。这包括会发消息、删远程资源的工具。不放心的话，把 `install.py` 里 `MATCHER` 的 `mcp__.*` 换成你信得过的那几个 MCP 服务。
+- Windows 上项目放在 C 盘的话，按上面的 C 盘规则，除了读，每一步都会问你。想让日常开发少弹窗，可以把项目放到别的盘。
 - 几个人共用同一个系统账号时，装一次就对所有人的会话都生效。
 
 <details>

@@ -29,6 +29,7 @@ Everything is decided locally by rules in one Python file. There are no extra mo
 | Reading files, searching code | Commands on the deny list, such as `git push -f`, `sudo`, `DROP TABLE` |
 | Web fetch and web search | Dangerous deletes, such as `rm -rf ~` or `rm -rf /var/www` |
 | MCP tools, Skill, Workflow | Commands that ask to run outside the sandbox, and any tool not listed on the left |
+| Looking around with sudo, such as `sudo docker ps` or `sudo ufw status` | On Windows, anything that touches drive C: except reading |
 
 Each approval covers that one call only, like clicking "1 Yes". It never picks "don't ask again" for you. The full rules are under [Rule details](#rule-details).
 
@@ -42,7 +43,7 @@ cd claude-code-auto-approve
 python3 install.py        # on Windows: python install.py
 ```
 
-The installer runs the tests and copies the hook to `~/.claude/hooks/`. It then registers the hook in `~/.claude/settings.json`, leaving your other settings alone and backing the file up whenever it changes something. Finally it runs the registered command once to make sure Claude Code can start it. Running it again is safe; it won't register the hook twice.
+The installer runs the tests and copies the hook to `~/.claude/hooks/`. It then registers the hook in `~/.claude/settings.json`, leaving your other settings alone and backing the file up whenever it changes something. Finally it runs the registered command once to make sure Claude Code can start it. Running it again is safe; it won't register the hook twice. On Windows (WSL included) it also registers a pre-execution check that guards drive C:; see [Rule details](#rule-details).
 
 > [!TIP]
 > A first install (when there is no mode file yet) starts in **dry run**: it logs decisions but approves nothing. Trigger any permission prompt in Claude Code, click it as usual, and look in `~/.claude/hooks/auto-approve.log`. A line with a session directory and `[试运行] 会自动确认` ("dry run: would approve") means it works. Then switch it on:
@@ -135,12 +136,31 @@ Use the hook with the default or acceptEdits mode. While auto mode is on, auto m
 - `git push` that rewrites or deletes remote history: `-f` (including combinations like `-uf`), `--force`, `--force-with-lease`, `--delete`, `-d`, `--mirror`, `+branch`, `:branch`. A plain push is approved.
 - `git reset --hard`, `git clean`, `git stash drop`, `git stash clear`. `git clean -n` only previews and is approved.
 - The git rules still match when global options sit in between, as in `git -C /some/repo push --force`.
-- `sudo`, `mkfs`, `fdisk`, `parted`, `shutdown`, `reboot`, `poweroff`, `halt`, `chmod 777` (also `0777`, `-R`, `-Rv`)
+- Privilege elevation: `sudo`, `doas`, `gsudo` (Windows), `pkexec`, and `Start-Process … -Verb RunAs` (run as administrator on Windows). When `sudo`, `doas` or `gsudo` is followed by a read-only command, it is approved; see "Read-only commands" below.
+- `mkfs`, `fdisk`, `parted`, `shutdown`, `reboot`, `poweroff`, `halt`, `chmod 777` (also `0777`, `-R`, `-Rv`)
 - `dd` that writes somewhere (`of=` a disk or an image file). A `dd` that only reads, or writes to `/dev/null`, is approved.
 - `DROP` or `TRUNCATE` of a `TABLE` / `DATABASE` / `SCHEMA`
 - `kubectl delete` (also with `-n` or `--context` first), `docker rm` / `rmi`, `docker container|image|volume|network|system rm|prune`, `docker compose down -v`
 - `npm` / `pnpm` / `yarn publish`. With `--dry-run` they are approved, and so is `kubectl delete --dry-run`.
 - Windows: `Format-Volume`, `Clear-Disk`, `Stop-Computer`, `Restart-Computer`
+
+**Read-only commands.** Commands that only look. `sudo` followed by one of these is approved, and on Windows they are the only commands approved when drive C: is involved.
+
+- Files, folders, disks: `ls`, `cat`, `head`, `tail`, `grep`, `find` (without `-delete` or `-exec`), `du`, `df`, `stat`, and so on
+- Processes, ports, firewalls: `ps`, `ss`, `netstat`, `lsof`, `ufw status`, `iptables -L` / `-S`, `nft list`, `firewall-cmd --list-*`, and `pfctl -s` on macOS
+- Services and logs: `systemctl status`, `journalctl` (except the cleanup options), `dmesg` (without `-c`), and `launchctl list` and `log show` on macOS
+- Containers: `ps`, `images`, `logs`, `inspect`, `info`, `volume ls`, `compose ps` and similar for `docker` / `podman` / `nerdctl`, plus `crictl ps`. Nothing depends on Docker, so machines without it work the same
+- Queries such as `git status`, `git log`, `git diff`, `git show`, `npm ls`, `pip list`, and `xxx --version`
+- PowerShell `Get-*`, `Test-*`, `Select-String`, `Select-Object` and similar
+
+Options such as `-u user` and `-n` are understood. Anything that changes something is still stopped, for example `sudo docker rm`, `sudo systemctl restart`, `sudo journalctl --vacuum-time=1d` or `sudo iptables -F`. The full list is `READ_ONLY_COMMANDS` in `auto-approve.py`.
+
+**Drive C: on Windows.** On Windows (including `/mnt/c` under WSL), if the current folder is on C:, or a command, file path or MCP argument touches C:, everything except reading needs your confirmation.
+
+- Reading files and searching are approved. A Bash or PowerShell command is approved only if every part of it is a read-only command and nothing is written to a file with `>`.
+- These spellings are recognised: `C:\…`, `C:/…`, Git Bash `/c/…`, WSL `/mnt/c/…`, and `~`, `$HOME`, `$env:USERPROFILE`, `%TEMP%` and other environment variables that point to C:.
+- Besides answering prompts, the hook registers a pre-execution check (PreToolUse). So even in acceptEdits mode, where Claude Code would edit project files without asking, edits on C: will prompt you.
+- To turn this off, change `PROTECTED_DRIVES = {"C"}` in `auto-approve.py` to `set()` and run `install.py` again. Add drive letters to protect more drives.
 
 **Deletes.** `rm` is not blocked outright. The hook works out each target and only stops the ones you can't undo:
 
@@ -176,6 +196,7 @@ This removes only this hook from `settings.json` and deletes the hook script. Th
 - Quoted text inside a command is checked as a command too, because it may be what `bash -c '…'` runs. So `echo "rm -rf ~"`, or a commit message that mentions `git push -f`, will prompt you. It errs towards asking.
 - File edits and writes are approved whatever the path, including `~/.claude/settings.json`, `~/.bashrc`, files under `.git/`, and this hook's own mode file. Claude Code's built-in confirmation for these sensitive files is approved too. If that matters to you, block those files with `permissions.deny` in `settings.json`.
 - MCP tools are always approved unless an argument hits the deny list, including tools that send messages or delete remote resources. If that worries you, replace `mcp__.*` in `MATCHER` in `install.py` with the MCP servers you trust.
+- On Windows, if your projects live on C:, the drive C: rule means every step except reading will ask you. To get fewer prompts in day-to-day work, keep projects on another drive.
 - If several people share one OS account, one install covers everyone's sessions.
 
 <details>

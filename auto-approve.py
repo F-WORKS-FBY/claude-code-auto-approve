@@ -3,9 +3,12 @@
 
   · 白名单里的工具（Bash/PowerShell 命令、文件编辑/写入、读文件/搜索、网络、MCP/Workflow、Skill）才会自动放行
   · 命令命中黑名单（DENY_PATTERNS）或删除目标危险（dangerous_rm）的，照常弹窗留给你
+  · sudo 后面跟的是只读命令（READ_ONLY_COMMANDS）时放行，其它提权照样留给你
+  · Windows（含 WSL）上涉及 C 盘（PROTECTED_DRIVES）的操作，除了读，一律留给你
   · 计划确认（ExitPlanMode）和选择题（AskUserQuestion）永远不碰
   · 放行只对这一次有效，等于点「1 Yes」，不会留下"不再询问"的规则
 不输出任何东西 = 照常弹窗。脚本出错、超时也是照常弹窗，不会误放行。
+Windows 上还会作为 PreToolUse 钩子登记：涉及 C 盘的写操作强制弹窗，acceptEdits 模式下本来不问的编辑也会问。
 
 开关文件，改完立刻生效，不用重启会话：
   <配置目录>/auto-approve.mode   on（文件不存在也算 on）/ off（暂停）/ dryrun（只记日志不放行）
@@ -17,6 +20,7 @@ Linux / macOS / Windows 通用，只用标准库。安装、说明见 README.md�
 """
 import json
 import os
+import platform
 import posixpath
 import re
 import sys
@@ -56,6 +60,48 @@ GIT_SEARCH_SUBCOMMANDS = {"grep", "log", "show", "diff", "blame"}
 
 # git 和子命令之间允许出现全局参数，比如 git -C /repo push、git -c k=v push、git --no-pager push
 GIT = r"""\bgit(?:\s+(?:-[Cc]\s*(?:(?:[^\s'"]*(?:'[^']*'|"[^"]*"))+[^\s'"]*|\S+)|--[\w-]+(?:=\S+)?))*\s+"""
+END = r"\s*(?=$|[;&|\n)])"   # 这一段命令到此为止，后面没有别的参数
+
+# 只读命令：只看不改。用在两处——
+#   · sudo / doas / gsudo 后面跟的是这些命令时放行（只是借 root 权限查看）；
+#   · Windows 上涉及 C 盘时，只有每一段都是这些命令（而且没有用 > 往文件里写）才放行。
+# 每条是正则，从命令名开始匹配，不区分大小写
+READ_ONLY_COMMANDS = [
+    # 文件、目录、磁盘、系统信息
+    r"(?:ls|ll|dir|tree|pwd|cd|cat|type|head|tail|less|more|wc|stat|file|du|df|lsblk|free|uptime|whoami|id|uname|hostname|date|which|where|whereis|printenv|echo|printf|true)\b",
+    r"(?:grep|egrep|fgrep|zgrep|zcat|rg|ag|ack|findstr)\b",
+    r"find\b(?![^;&|\n]*\s-(?:delete|exec|execdir|ok|okdir|fprint\w*|fls)\b)",
+    # 进程、端口、防火墙、服务、日志（Linux / macOS / Windows）
+    r"(?:ps|pgrep|ss|netstat|lsof|ipconfig|nslookup|dig)\b",
+    r"ufw\s+status\b",
+    r"firewall-cmd\s+--(?:state|list|get|query)",
+    r"ip6?tables(?:-legacy|-nft)?\b(?=[^;&|\n]*\s(?-i:-[a-zA-Z]*[LS]\b|--list\b|--list-rules\b))"
+    r"(?![^;&|\n]*\s(?-i:-[a-zA-Z]*[FADIXPZNER]\b|--(?:flush|append|delete|insert|policy|zero|new-chain|rename-chain|replace)\b))",
+    r"ip6?tables-save\b",
+    r"nft\s+(?:-\S+\s+)*list\b",
+    r"pfctl\s+-s",
+    r"systemctl\s+(?:status|is-active|is-enabled|is-failed|list-\S+|show|cat)\b",
+    r"journalctl\b(?![^;&|\n]*--(?:vacuum|rotate|flush|sync|relinquish))",
+    r"dmesg\b(?![^;&|\n]*\s(?:-[a-zA-Z]*[cC]\b|--clear\b|--read-clear\b))",
+    r"launchctl\s+(?:list|print)\b",
+    r"log\s+show\b",
+    # 容器的查询：docker / podman / nerdctl / crictl 都认，没装 docker 的机器不受影响
+    r"(?:docker|podman|nerdctl)(?:\s+compose)?\s+(?:ps|ls|images|logs|inspect|info|version|stats|top|port|config|events|history|diff)\b",
+    r"(?:docker|podman|nerdctl)\s+(?:container|image|volume|network|system|context|pod)\s+(?:ls|list|ps|inspect|df|info|logs|top|port)\b",
+    r"crictl\s+(?:ps|pods|images|img|inspect\w*|info|logs|stats|version)\b",
+    # git、包管理器的查询
+    GIT.replace(r"\bgit", "git", 1) + r"(?:status|log|diff|show|blame|grep|ls-files|ls-tree|rev-parse|describe|shortlog|cat-file|whatchanged)\b",
+    GIT.replace(r"\bgit", "git", 1) + r"(?:branch|tag|remote)(?:\s+(?:-a|-r|-v+|-l|--list|--all|--remotes|--show-current|--verbose))*" + END,
+    GIT.replace(r"\bgit", "git", 1) + r"(?:stash\s+list|config\s+(?:--get\S*|--list|-l))\b",
+    r"(?:npm|pnpm|yarn)\s+(?:ls|list|view|info|outdated|why)\b",
+    r"(?:pip3?|python3?\s+-m\s+pip)\s+(?:list|show|freeze|check)\b",
+    r"\S+\s+(?:--version|--help)" + END,
+    # PowerShell：Get-* / Test-* 这类只读命令
+    r"(?:Get-\w+|Test-\w+|Resolve-Path|Select-String|Measure-Object|Select-Object|Sort-Object|Where-Object|Format-\w+|Out-String|Write-Output|Write-Host|ConvertTo-\w+|ConvertFrom-\w+|Compare-Object|Group-Object|gci|gc|gi|gp|gps|gsv|gcm|sls|select|sort|measure|ft|fl)\b",
+]
+
+# Windows（包括 WSL 里的 /mnt/c）上，涉及这些盘的操作，除了读，一律留给你。不需要就改成 set()
+PROTECTED_DRIVES = {"C"}
 
 # 黑名单：命令里出现其中一条，就不自动放行（正则，不区分大小写）
 # rm 不在这里一刀切，而是解析出删除目标、只拦"删了就是灾难"的（见 dangerous_path）：
@@ -70,7 +116,11 @@ DENY_PATTERNS = [
     GIT + r"reset\b[^;&|\n]*\s--hard\b",
     GIT + r"clean\b(?![^;&|\n]*\s(?:-[a-zA-Z]*n[a-zA-Z]*|--dry-run)\b)",   # git clean -n（只预览）放行
     GIT + r"stash\s+(?:drop|clear)\b",
-    r"\bsudo\b",
+    # 提权：sudo / doas / gsudo 后面跟的不是只读命令（见 READ_ONLY_COMMANDS）就留给你；pkexec、以管理员身份启动一律留给你
+    r"\b(?:sudo|doas|gsudo)\b(?!(?:\s+(?:-(?![A-Za-z]*[ugpCDhrtUT])[A-Za-z]+|-[A-Za-z]*[ugpCDhrtUT]\s*\S+|--[\w-]+(?:=\S+)?|[A-Za-z_]\w*=\S*))*"
+    r"\s+(?:\S*[\\/])?(?:" + "|".join(READ_ONLY_COMMANDS) + r"))",
+    r"\bpkexec\b",
+    r"\bStart-Process\b[^;&|\n]*\s-Verb\s+RunAs\b",
     r"\b(?:mkfs|fdisk|parted)\b",
     r"\bdd\b[^;&|\n]*\bof=(?!/dev/null\b)",              # 只拦往外写的 dd（写盘、写镜像）；只读和写到 /dev/null 的放行
     r"(?<![\w-])(?:shutdown|reboot|poweroff|halt)\b(?![\w.-])",
@@ -107,6 +157,25 @@ def _norm(path):
 
 
 MY_HOME = _norm(HOME).rstrip("/")
+
+
+def _platform():
+    """windows / wsl / posix。AUTO_APPROVE_PLATFORM 可以强制指定（测试用）"""
+    forced = os.environ.get("AUTO_APPROVE_PLATFORM")
+    if forced:
+        return forced
+    if os.name == "nt":
+        return "windows"
+    if os.environ.get("WSL_DISTRO_NAME") or "microsoft" in platform.release().lower():
+        return "wsl"
+    return "posix"
+
+
+PLATFORM = _platform()
+READ_ONLY = re.compile(r"(?:\S*[\\/])?(?:%s)" % "|".join(READ_ONLY_COMMANDS), re.I)
+DRIVE_REF = re.compile(r"""(?:^|[\s'"=(,;])(?:([A-Za-z]):(?:[\\/]|(?=[\s'"]|$))|/(?:mnt/)?([A-Za-z])/)""")
+ENV_REF = re.compile(r"\$\{?(?:env:)?(\w+)\}?|%(\w+)%", re.I)
+REDIRECT = re.compile(r"(?<![<>])\d?>>?\s*(?!&\d|>)([^\s;&|]+)")
 
 
 # ---------------------------- 切命令 ----------------------------
@@ -282,6 +351,65 @@ def dangerous_rm(cmd, depth=0):
     return None
 
 
+# ---------------------------- Windows 的 C 盘 ----------------------------
+
+def on_protected_drive(path):
+    """路径在受保护的盘上：C:\\x、C:/x、Git Bash 的 /c/x、WSL 的 /mnt/c/x"""
+    p = (path or "").strip().strip("\"'").replace("\\", "/")
+    m = re.match(r"([A-Za-z]):(?:/|$)", p) or re.match(r"/(?:mnt/)?([A-Za-z])(?:/|$)", p)
+    return bool(m) and m.group(1).upper() in PROTECTED_DRIVES
+
+
+def touches_protected(text, cwd):
+    """当前目录在受保护的盘上，或者文字里出现了指向它的路径、环境变量、~"""
+    if on_protected_drive(cwd):
+        return True
+    if any((m.group(1) or m.group(2)).upper() in PROTECTED_DRIVES for m in DRIVE_REF.finditer(text)):
+        return True
+    if any(on_protected_drive(os.environ.get(m.group(1) or m.group(2), "")) for m in ENV_REF.finditer(text)):
+        return True
+    return bool(re.search(r"""(?:^|[\s'"=])~(?=[\\/\s'"]|$)""", text)) and on_protected_drive(HOME)
+
+
+def writes_file(segment):
+    """这一段命令有没有用 > / >> 往文件里写（写到 /dev/null、NUL、$null 不算）"""
+    bare = re.sub(r"""'[^']*'|"(?:\\.|[^"\\])*\"""", "", segment)
+    return any(m.group(1).lower() not in ("/dev/null", "nul", "nul:", "$null") for m in REDIRECT.finditer(bare))
+
+
+def read_only(cmd):
+    """整条命令只是在读：每一段都是只读命令，没有往文件里写，也没有 $(...)"""
+    cmd = re.sub(r"[\\`]\r?\n", " ", cmd)
+    if "$(" in cmd:
+        return False
+    cmd = re.sub(r"\d*>&\d+", " ", cmd)            # 2>&1 只是合并输出，别让 & 把命令切开
+    cmd = re.sub(r"&(>>?)", r"\1", cmd)             # &>file 和 >file 一样是写文件
+    for raw, words in split_segments(cmd):
+        plain = [unquote(w) for w in words]
+        while plain and ENV_ASSIGN.fullmatch(plain[0]):
+            plain.pop(0)
+        if plain and (not READ_ONLY.match(" ".join(plain)) or writes_file(raw)):
+            return False
+    return True
+
+
+def protected_write(tool, tool_input, cwd):
+    """Windows（含 WSL）上涉及受保护的盘、又不只是读的，返回原因；否则返回 None"""
+    if PLATFORM not in ("windows", "wsl") or not PROTECTED_DRIVES:
+        return None
+    reason = "Windows：涉及 %s 盘，除了读都要你确认" % "/".join(sorted(PROTECTED_DRIVES))
+    if tool in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+        path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        relative = not re.match(r"[A-Za-z]:|[\\/~]", path)
+        return reason if on_protected_drive(path) or (relative and on_protected_drive(cwd)) else None
+    if tool in SHELL_TOOLS:
+        cmd = tool_input.get("command") if isinstance(tool_input.get("command"), str) else ""
+        return reason if touches_protected(cmd, cwd) and not read_only(cmd) else None
+    if tool.startswith("mcp__"):
+        return reason if touches_protected("\n".join(strings(tool_input)), "") else None
+    return None
+
+
 # ---------------------------- 判定 ----------------------------
 
 def strings(value, key=None):
@@ -298,7 +426,7 @@ def strings(value, key=None):
             yield from strings(v, key)
 
 
-def decide(tool, tool_input, permission_mode=""):
+def decide(tool, tool_input, permission_mode="", cwd=""):
     """返回 (是否放行, 放行的类别 / 不放行的原因)"""
     if tool in NEVER_TOOLS:
         return False, NEVER_TOOLS[tool]
@@ -309,6 +437,9 @@ def decide(tool, tool_input, permission_mode=""):
         return False, "auto 模式下命令由 Claude Code 自己判断"   # 这时 Claude Code 不采纳钩子对命令的放行
     if tool in SHELL_TOOLS and tool_input.get("dangerouslyDisableSandbox"):
         return False, "要求在沙箱外运行"
+    reason = protected_write(tool, tool_input, cwd)
+    if reason:
+        return False, reason
     if tool in SHELL_TOOLS:
         cmd = tool_input.get("command")
         text = command_text(cmd if isinstance(cmd, str) else "")
@@ -389,7 +520,16 @@ def main():
     tool_input = event.get("tool_input")
     if not isinstance(tool_input, dict):
         tool_input = {}
-    ok, why = decide(tool, tool_input, event.get("permission_mode") or "")
+    cwd = event.get("cwd") or ""
+    if event.get("hook_event_name") == "PreToolUse":
+        # 执行前检查（只在 Windows 上登记）：涉及 C 盘的写操作强制弹窗，acceptEdits 模式下也一样
+        reason = protected_write(tool, tool_input, cwd)
+        if reason:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                     "permissionDecisionReason": reason}}))   # 只输出 ASCII：Windows 控制台编码打不了中文
+            log("要求确认（%s）%s" % (reason, describe(event, tool, tool_input)))
+        return
+    ok, why = decide(tool, tool_input, event.get("permission_mode") or "", cwd)
     what = describe(event, tool, tool_input)
     if not ok:
         log("跳过（%s）%s" % (why, what))

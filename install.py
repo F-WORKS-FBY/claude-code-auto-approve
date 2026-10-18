@@ -11,15 +11,18 @@ Windows 上把 python3 换成 python（或 py -3）。
   1. 跑一遍 tests/test_hook.py（--skip-tests 跳过）
   2. 把 auto-approve.py 拷到 <配置目录>/hooks/（内容没变就不动；装着的那份被改过，先备份再覆盖）
   3. 写开关文件（第一次装是 dryrun）
-  4. 在 <配置目录>/settings.json 的 hooks.PermissionRequest 里登记这个钩子。
+  4. 在 <配置目录>/settings.json 的 hooks.PermissionRequest 里登记这个钩子；Windows（含 WSL）上
+     再登记到 hooks.PreToolUse，用来对 C 盘的写操作强制弹窗。
      原有的配置、别的钩子都不动；有改动才写，写之前先备份成 settings.json.bak-<时间>；重复安装不会重复登记
   5. 把登记的命令按 Claude Code 的方式实际跑一遍，确认能放行、能拦下（自检）
 <配置目录> 默认是 $CLAUDE_CONFIG_DIR，没设就是 ~/.claude；可以用 --config-dir 指定。
 """
 import argparse
 import filecmp
+import importlib.util
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -31,8 +34,25 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK_NAME = "auto-approve.py"
 MATCHER = "Bash|PowerShell|Edit|MultiEdit|NotebookEdit|Write|Read|Glob|Grep|WebFetch|WebSearch|Skill|Workflow|mcp__.*"
+PRE_MATCHER = "Bash|PowerShell|Edit|MultiEdit|NotebookEdit|Write|mcp__.*"   # 执行前检查只管能写东西的工具
 TIMEOUT = 10
 WINDOWS = os.name == "nt"
+EVENTS = ("PermissionRequest", "PreToolUse")
+
+
+def _platform():
+    """和钩子同样的判断：windows / wsl / posix（AUTO_APPROVE_PLATFORM 可以强制指定，测试用）"""
+    forced = os.environ.get("AUTO_APPROVE_PLATFORM")
+    if forced:
+        return forced
+    if WINDOWS:
+        return "windows"
+    if os.environ.get("WSL_DISTRO_NAME") or "microsoft" in platform.release().lower():
+        return "wsl"
+    return "posix"
+
+
+PLATFORM = _platform()
 LEGACY = re.compile(r"[\\/]\.claude[\\/]hooks[\\/]auto-approve\.py\b")   # 手动登记（没用 install.py）的：<某处>/.claude/hooks/auto-approve.py
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -93,8 +113,8 @@ def load_settings(path):
     if not isinstance(data, dict):
         fail("%s 的最外层不是一个对象 {...}。没有改动任何东西。" % path)
     hooks = data.get("hooks", {})
-    if not isinstance(hooks, dict) or not isinstance(hooks.get("PermissionRequest", []), list):
-        fail("%s 里的 hooks / hooks.PermissionRequest 格式不对。没有改动任何东西，请手动检查。" % path)
+    if not isinstance(hooks, dict) or any(not isinstance(hooks.get(e, []), list) for e in EVENTS):
+        fail("%s 里的 hooks / hooks.PermissionRequest / hooks.PreToolUse 格式不对。没有改动任何东西，请手动检查。" % path)
     return data
 
 
@@ -141,18 +161,18 @@ def is_ours(command, dst):
     return any(same_path(w, dst) or LEGACY.search(w) and w.replace("\\", "/").endswith("/" + HOOK_NAME) for w in words)
 
 
-def hook_entries(data):
-    entries = data.get("hooks", {}).get("PermissionRequest", [])
+def hook_entries(data, event="PermissionRequest"):
+    entries = data.get("hooks", {}).get(event, [])
     return [e for e in entries if isinstance(e, dict) and isinstance(e.get("hooks"), list)]
 
 
-def our_commands(data, dst):
-    return [h.get("command") for e in hook_entries(data) for h in e["hooks"]
+def our_commands(data, dst, event="PermissionRequest"):
+    return [h.get("command") for e in hook_entries(data, event) for h in e["hooks"]
             if isinstance(h, dict) and is_ours(str(h.get("command", "")), dst)]
 
 
 def strip_ours(entries, dst):
-    """去掉 PermissionRequest 里属于这个钩子的项，别人的原样留着（本来就是空列表的也留着）"""
+    """去掉某个事件下属于这个钩子的项，别人的原样留着（本来就是空列表的也留着）"""
     kept = []
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
@@ -212,7 +232,7 @@ def use_powershell():
     return WINDOWS and not git_bash()
 
 
-def hook_entry(python, hook_path, powershell):
+def hook_entry(python, hook_path, powershell, matcher=MATCHER):
     """settings.json 里登记的那一项"""
     if WINDOWS:
         command = '%s "%s"' % (python, hook_path.replace("\\", "/"))   # 正斜杠 + 双引号：Git Bash、PowerShell 都认
@@ -223,7 +243,20 @@ def hook_entry(python, hook_path, powershell):
     hook = {"type": "command", "command": command, "timeout": TIMEOUT}
     if powershell:
         hook["shell"] = "powershell"   # 不写的话，没有 Git Bash 时 Claude Code 只认退出码 0 和 2，判定会出错
-    return {"matcher": MATCHER, "hooks": [hook]}
+    return {"matcher": matcher, "hooks": [hook]}
+
+
+def guards_c_drive(hook_path):
+    """要不要登记执行前检查：只在 Windows / WSL 上，而且钩子里的 PROTECTED_DRIVES 没被清空"""
+    if PLATFORM not in ("windows", "wsl"):
+        return False
+    try:
+        spec = importlib.util.spec_from_file_location("auto_approve_hook", hook_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return bool(mod.PROTECTED_DRIVES)
+    except Exception:
+        return True
 
 
 def shells():
@@ -238,29 +271,33 @@ def shells():
     return [("PowerShell", lambda c: [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", c])]
 
 
-def self_check(command):
-    """把登记的命令用 Claude Code 会用的 shell 跑一遍，喂两个事件：普通命令应放行，危险命令应留给人。返回出错信息列表"""
+def self_check(command, c_drive=False):
+    """把登记的命令用 Claude Code 会用的 shell 跑一遍：普通命令应放行，危险命令应留给人；
+    登记了执行前检查的，再喂一个写 C 盘的事件，应要求确认。返回出错信息列表"""
     errors = []
     tmp = tempfile.mkdtemp(prefix="auto-approve-check-")
     mode = os.path.join(tmp, "mode")
     with open(mode, "w") as f:
         f.write("on\n")
     env = dict(os.environ, AUTO_APPROVE_MODE_FILE=mode, AUTO_APPROVE_LOG=os.path.join(tmp, "log"))
-    cases = [("ls -la", True), ("rm -rf ~", False)]   # 只是喂给钩子判断的文字，不会被执行
+    # 都只是喂给钩子判断的文字，不会被执行
+    cases = [("放行「ls -la」", {"tool_name": "Bash", "tool_input": {"command": "ls -la"}}, '"allow"', True),
+             ("留给人「rm -rf ~」", {"tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}}, '"allow"', False)]
+    if c_drive:
+        c = "C:\\x" if PLATFORM == "windows" else "/mnt/c/x"
+        cases.append(("对写 C 盘的操作要求确认", {"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": c,
+                                     "tool_input": {"file_path": c + "/a.txt", "content": "x"}}, '"ask"', True))
     try:
         for name, argv in shells():
-            for cmd, expect in cases:
-                event = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}).encode()
+            for label, event, mark, expect in cases:
                 try:
-                    p = subprocess.run(argv(command), input=event, env=env,
+                    p = subprocess.run(argv(command), input=json.dumps(event).encode(), env=env,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT * 3)
                     out, err = p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace")
                 except (OSError, subprocess.SubprocessError) as e:
                     out, err = "", str(e)
-                if ('"allow"' in out) != expect:
-                    errors.append("[%s] 喂「%s」应%s，实际%s。%s" % (
-                        name, cmd, "放行" if expect else "留给人", "放行" if '"allow"' in out else "没有放行",
-                        err.strip()[-300:]))
+                if (mark in out) != expect:
+                    errors.append("[%s] 应%s，实际没有做到。%s" % (name, label, err.strip()[-300:]))
                     break
             else:
                 print("  ✓ 自检通过（%s）" % name)
@@ -328,13 +365,19 @@ def install(args):
         fail("写不了 %s：%s" % (hooks_dir, e))
     mode = read_mode(mode_path)
 
-    entry = hook_entry(python_command(args.python), dst, use_powershell())
+    python, powershell, c_drive = python_command(args.python), use_powershell(), guards_c_drive(dst)
+    entry = hook_entry(python, dst, powershell)
     command = entry["hooks"][0]["command"]
-    old = [c for c in our_commands(data, dst) if c != command]
+    old = [c for e in EVENTS for c in our_commands(data, dst, e) if c != command]
     hooks = data.setdefault("hooks", {})
-    entries = strip_ours(hooks.get("PermissionRequest", []), dst)
-    entries.append(entry)
-    hooks["PermissionRequest"] = entries
+    for event, wanted in (("PermissionRequest", entry), ("PreToolUse", hook_entry(python, dst, powershell, PRE_MATCHER))):
+        entries = strip_ours(hooks.get(event, []), dst)
+        if event == "PermissionRequest" or c_drive:
+            entries.append(wanted)
+        if entries:
+            hooks[event] = entries
+        elif hooks.get(event, []) != []:
+            hooks.pop(event)                        # 原来只有我们这一项，摘掉后不留空列表
     backup = save_settings(settings_path, data, before)
     for c in old:
         print("  - 换掉了原来登记的：%s" % c)
@@ -343,9 +386,11 @@ def install(args):
     else:
         print("  ✓ %s 里已经登记过，没有改动" % settings_path)
     print("    命令：%s" % command)
+    if c_drive:
+        print("    Windows：同时登记了执行前检查（PreToolUse），涉及 C 盘的写操作会强制弹窗")
     print("  ✓ 开关：%s → %s" % (mode_path, mode))
 
-    errors = self_check(command)
+    errors = self_check(command, c_drive)
     for msg in errors:
         print("  ✗ " + msg)
     if errors:
@@ -386,19 +431,20 @@ def uninstall(args):
     print("配置目录：%s" % cfg)
     before = load_settings(settings_path)
     data = json.loads(json.dumps(before))
-    removed = our_commands(data, dst)
+    removed = [(e, c) for e in EVENTS for c in our_commands(data, dst, e)]
     if removed:
         hooks = data["hooks"]
-        entries = strip_ours(hooks.get("PermissionRequest", []), dst)
-        if entries:
-            hooks["PermissionRequest"] = entries
-        else:
-            hooks.pop("PermissionRequest", None)
+        for event in {e for e, _ in removed}:
+            entries = strip_ours(hooks.get(event, []), dst)
+            if entries:
+                hooks[event] = entries
+            else:
+                hooks.pop(event, None)
         if not hooks:
             data.pop("hooks", None)
         backup = save_settings(settings_path, data, before)
-        for c in removed:
-            print("  ✓ 已从 settings.json 摘掉：%s" % c)
+        for event, c in removed:
+            print("  ✓ 已从 settings.json 的 %s 摘掉：%s" % (event, c))
         print("    原文件备份为 %s" % os.path.basename(backup))
     else:
         print("  - settings.json 里没有登记这个钩子")
