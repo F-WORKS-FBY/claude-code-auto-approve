@@ -152,17 +152,28 @@ Claude Code 自带一个 auto 模式，也是为了少打扰你。它的做法�
 - 看进程、端口、防火墙：`ps`、`ss`、`netstat`、`lsof`、`ufw status`、`iptables -L` / `-S`、`nft list`、`firewall-cmd --list-*`，macOS 的 `pfctl -s`
 - 看服务和日志：`systemctl status`、`journalctl`（清理日志的参数除外）、`dmesg`（不带 `-c`），macOS 的 `launchctl list`、`log show`
 - 看容器：`docker` / `podman` / `nerdctl` 的 `ps`、`images`、`logs`、`inspect`、`info`、`volume ls`、`compose ps` 等，以及 `crictl ps`。不依赖 docker，没装 docker 的机器照样适用
-- `git status`、`git log`、`git diff`、`git show` 这类查询，`npm ls`、`pip list` 这类查询，`xxx --version`
+- `git status`、`git log`、`git diff`、`git show` 这类查询，`npm ls`、`pip list` 这类查询
 - PowerShell 的 `Get-*`、`Test-*`、`Select-String`、`Select-Object` 这类命令
 
-带 `-u 用户`、`-n` 这些参数也认得。会改东西的照样拦，比如 `sudo docker rm`、`sudo systemctl restart`、`sudo journalctl --vacuum-time=1d`、`sudo iptables -F`。完整清单在 `auto-approve.py` 的 `READ_ONLY_COMMANDS`。
+带 `-u 用户`、`-n` 这些参数也认得。会改东西的照样拦，比如 `sudo docker rm`、`sudo systemctl restart`、`sudo journalctl --vacuum-time=1d`、`sudo iptables -F`。
+
+sudo 后面是以 root 身份运行，所以这些命令里能写文件、能执行别的程序、能改系统状态的用法也照样拦：`tree -o`、`file -C`、`git log --output`、`git -c 配置项=值`（`core.fsmonitor` 这类配置会执行程序）、`git grep -O`、`rg --pre`、`ag --pager`、`date -s`、`hostname 新名字`、`dmesg -n`、`ss -K`、`docker config create`（`config` 只在 `compose` 后面认）。完整清单在 `auto-approve.py` 的 `SUDO_READ_ONLY`。
+
+Windows 上判断 C 盘时，在上面这些之外还认：
+
+- 文本处理：`sort`、`uniq`、`cut`、`tr`、`sed`、`awk`、`jq`、`yq`、`diff` 等，sudo 后面不放行。会写文件、执行命令的用法除外：`sort -o`、`sort --compress-program`、`sed -i`、`sed -f`、`yq -i`、`yq -s`、awk 的 `-i inplace`、`-f`、`system()`、`>`，`uniq` 的第二个文件参数。`sed` 还会按它的语法看脚本：`w`、`W`、`e` 命令和 `s///w`、`s///e` 都不算只读，`s/hello/world/` 这种替换里的字母不算
+- 不带路径的 `xxx --version`、`xxx --help`。带路径的可能是任意程序，不算
 
 **Windows 的 C 盘**：在 Windows 上（包括 WSL 里的 `/mnt/c`），只要当前目录在 C 盘，或者命令、文件路径、MCP 参数里涉及 C 盘，除了读，一律要你确认。
 
 - 读文件、搜索放行；Bash / PowerShell 命令每一段都是只读命令，而且没有用 `>` 往文件里写，才放行。
-- 认得这些写法：`C:\…`、`C:/…`、Git Bash 的 `/c/…`、WSL 的 `/mnt/c/…`，以及指向 C 盘的 `~`、`$HOME`、`$env:USERPROFILE`、`%TEMP%` 这类环境变量。
+- 认得这些写法：`C:\…`、`C:/…`、Git Bash 的 `/c/…`、WSL 的 `/mnt/c/…`，以及指向 C 盘的 `~`、`$HOME`、`$env:USERPROFILE`、`%TEMP%` 这类环境变量。Git Bash 里的 `/tmp` 就是 `%TEMP%`，也算 C 盘。PowerShell 的 `$_` 是管道变量，不当环境变量。
+- 不提路径、但会写进 C 盘用户目录的命令也算涉及 C 盘：`pip install`、`npm -g`、`git config --global`（`--get` 除外）、`setx`、`reg add`、`winget install`、`claude mcp add` 等，完整清单在 `USER_PROFILE_WRITERS`。
+- 套了一层壳的命令按里面真正执行的命令判断，最多拆两层：`bash -c '…'`、`powershell -Command "…"`、`cmd /c …`。`powershell -File`、`-EncodedCommand`、`bash 脚本.sh` 看不到要执行什么，不算只读。
+- PowerShell 按它自己的语法判断：字符串和注释里的内容不算；全文（包括花括号里）出现的 `动词-名词` 命令只能是 Get、Test、Select、Where、Sort、Format、Measure 这类读取的，所以 `Select-Object @{e={Remove-Item $_}}` 这种藏起来的删除也认得出；`[IO.File]::WriteAllText`、`.Delete()`、`.InvokeMember()`、给对象的属性赋值、`&` 调用程序、`iex`、`"$(…)"` 都不算只读。
 - 钩子除了接手弹窗，还会登记一个执行前检查（PreToolUse）。所以开着 acceptEdits 模式时，Claude Code 本来不问就会改的项目文件，只要在 C 盘，也会弹窗问你。
 - 不想要这条规则，把 `auto-approve.py` 里的 `PROTECTED_DRIVES = {"C"}` 改成 `set()`，再跑一次 `install.py`。想多保护几个盘，就往里面加盘符。
+- 判断只看命令文字，程序运行时自己往 C 盘写的东西看不到：比如 `npm install` 写 npm 缓存、`python install.py` 写 `~/.claude`、脚本写 `%TEMP%`。
 
 **删除**：`rm` 不会一律拦下。钩子会先解析出删除目标，只拦删了就无法挽回的那些。
 

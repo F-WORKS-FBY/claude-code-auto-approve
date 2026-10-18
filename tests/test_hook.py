@@ -87,6 +87,13 @@ APPROVE = [
     (bash("doas docker ps"), "doas 只读"),
     (ps("sudo netstat -ano"), "Windows：sudo netstat"),
     (ps("gsudo Get-Service"), "Windows：gsudo Get-Service"),
+    (bash("sudo date; sudo date +%F; sudo date -d '2020-01-01 10:00'"), "sudo date 看时间"),
+    (bash("sudo hostname -f && sudo hostname"), "sudo hostname 查看"),
+    (bash("sudo tree -L 2 /etc/nginx"), "sudo tree 查看"),
+    (bash("sudo rg -n error /var/log/nginx"), "sudo rg 搜索"),
+    (bash("sudo docker compose config && sudo docker compose ls"), "sudo docker compose config 打印配置"),
+    (bash("sudo git -C /srv/repo log --oneline -5"), "sudo git -C 查看"),
+    (bash("sudo dmesg -T | tail"), "sudo dmesg -T"),
     # 喂给解释器、又不执行命令的代码当数据：里面的 sudo / rm -rf / DROP TABLE 只是文字
     (bash('M=~/notes; python3 -I - "$M" <<\'PYEOF\'\nimport os, re, sys\n'
           'edit("infra", [(lambda t: re.sub(r"x", "本机有 docker，但不在 docker 组（每条要 sudo）；`rm -rf ~` 别用", t), None)])\n'
@@ -172,6 +179,31 @@ LEAVE = [
     (bash("pkexec rm /etc/x"), "pkexec"),
     (ps("gsudo Remove-Item C:\\x"), "gsudo（Windows）"),
     (ps("Start-Process powershell -Verb RunAs"), "以管理员身份运行"),
+    # 看起来只读、其实能写文件 / 执行程序 / 改系统状态的用法：sudo 照样留给你
+    (bash("sudo sed -n '1e touch /tmp/pwned' /etc/hosts"), "sudo sed：e 命令执行命令"),
+    (bash("sudo sed -n 'w /etc/cron.d/x' /tmp/in"), "sudo sed：w 命令写文件"),
+    (bash("sudo sed -n '1,20p' /etc/hosts"), "sudo sed：文本工具不在 sudo 清单里"),
+    (bash("sudo yq -i '.a = 1' /etc/app.yaml"), "sudo yq -i"),
+    (bash("sudo gawk -i inplace '{print}' /etc/hosts"), "sudo gawk -i inplace"),
+    (bash("sudo sort --compress-program=/tmp/evil /etc/hosts"), "sudo sort --compress-program"),
+    (bash("sudo date -s '2020-01-01'"), "sudo date -s 改时间"),
+    (bash("sudo date 010112002020"), "sudo date 数字参数改时间"),
+    (bash("sudo hostname evil"), "sudo hostname 改主机名"),
+    (bash("sudo tree -o /etc/cron.d/x /"), "sudo tree -o 写文件"),
+    (bash("sudo rg --pre /tmp/evil x /etc"), "sudo rg --pre 执行程序"),
+    (bash("sudo ag --pager /tmp/evil x /etc"), "sudo ag --pager 执行程序"),
+    (bash("sudo docker config create app_cfg /tmp/x"), "sudo docker config create"),
+    (bash("sudo docker compose config -o /etc/x.yaml"), "sudo docker compose config -o"),
+    (bash("sudo file -C -m /tmp/magic"), "sudo file -C 写文件"),
+    (bash("sudo git log --output=/etc/cron.d/x"), "sudo git log --output 写文件"),
+    (bash("sudo git -c core.fsmonitor=/tmp/evil status"), "sudo git -c 执行程序"),
+    (bash("sudo git grep -O/tmp/evil x"), "sudo git grep -O 执行程序"),
+    (bash("sudo /tmp/evil --version"), "sudo 任意程序 --version"),
+    (bash("sudo dmesg -n 1"), "sudo dmesg -n 改日志级别"),
+    (bash("sudo journalctl --setup-keys"), "sudo journalctl --setup-keys"),
+    (bash("sudo pfctl -s rules -F all"), "sudo pfctl -s 后面跟 -F"),
+    (bash("sudo ss -K dst 10.0.0.1"), "sudo ss -K 断开连接"),
+    (bash("sudo firewall-cmd --list-all --add-port=80/tcp"), "sudo firewall-cmd 查看夹带修改"),
     # 解释器代码里会去执行命令的，照常检查
     (bash("python3 - <<'EOF'\nimport subprocess\nsubprocess.run('sudo rm -rf /srv', shell=True)\nEOF"), "Python heredoc 里 subprocess"),
     (bash("python3 -c \"import os; os.system('rm -rf ~')\""), "python -c 里 os.system"),
@@ -311,6 +343,15 @@ MODES = [
 
 # Windows 的 C 盘：(平台, 工具, 参数, 当前目录, 是否放行, 说明)
 C_PROJ, D_WORK = "C:\\Users\\me\\proj", "D:\\work"
+# 真实用过的命令：查虚拟化信息，全是读（变量、字符串拼接、计算属性、花括号、Test-Path 'C:\…'）
+REAL_PS = ('powershell.exe -NoProfile -Command "\n'
+           "Get-CimInstance Win32_Processor | Select-Object Name, VirtualizationFirmwareEnabled | Format-List | Out-String -Width 200\n"
+           "Get-CimInstance Win32_OptionalFeature | Where-Object { \\$_.Name -in 'VirtualMachinePlatform','Microsoft-Hyper-V-All' } | "
+           "Select-Object Name, InstallState | Format-Table -AutoSize | Out-String\n"
+           "'LOCALAPPDATA=' + \\$env:LOCALAPPDATA; 'TEMP=' + \\$env:TEMP\n"
+           "Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n='UsedGB';e={[math]::Round(\\$_.Used/1GB,1)}} | Format-Table\n"
+           "Test-Path 'C:\\Program Files\\WSL'; Test-Path \\\"\\$env:USERPROFILE\\.wslconfig\\\"\n"
+           '"')
 DRIVES = [
     ("windows", "Bash", {"command": "npm install"}, C_PROJ, False, "C 盘目录里装依赖"),
     ("windows", "Bash", {"command": "git status && git log --oneline -5"}, C_PROJ, True, "C 盘目录里 git 查看"),
@@ -338,12 +379,119 @@ DRIVES = [
     ("windows", "Grep", {"pattern": "x", "path": "C:\\Users\\me"}, C_PROJ, True, "搜 C 盘（Grep 工具）"),
     ("windows", "mcp__fs__write_file", {"path": "C:\\Users\\me\\x.txt", "content": "x"}, D_WORK, False, "MCP 参数里有 C 盘路径"),
     ("windows", "mcp__fs__write_file", {"path": "D:\\work\\x.txt", "content": "x"}, D_WORK, True, "MCP 参数里只有 D 盘"),
+    ("windows", "mcp__ide__getDiagnostics", {"uri": "file:///c%3A/Users/me/a.py"}, D_WORK, False, "MCP 参数里 file:///c%3A"),
+    # Git Bash 的 /tmp、$TEMP、~ 都在 C 盘上
+    ("windows", "Bash", {"command": "echo hi > /tmp/x.txt"}, D_WORK, False, "写 /tmp（Git Bash 的 /tmp 就是 C 盘 TEMP）"),
+    ("windows", "Bash", {"command": "cd /tmp/x && grep -rn y . | head"}, D_WORK, True, "在 /tmp 里只读"),
+    ("windows", "Bash", {"command": 'echo hi > "$TEMP/x.txt"'}, D_WORK, False, "写 $TEMP"),
+    ("windows", "Bash", {"command": 'echo hi > "C:/Users/me/x.txt"'}, D_WORK, False, "> 写到带引号的 C 盘路径"),
+    ("windows", "Bash", {"command": "tail -n 50 $TEMP/a.log"}, D_WORK, True, "读 $TEMP"),
+    ("windows", "Bash", {"command": "touch ~/a.txt"}, D_WORK, False, "touch ~"),
+    ("windows", "Bash", {"command": "cat ~/.claude/settings.json"}, D_WORK, True, "读 ~"),
+    ("windows", "Bash", {"command": "rm -rf %APPDATA%\\foo"}, D_WORK, False, "cmd 写法 %APPDATA%"),
+    ("windows", "Bash", {"command": "mkdir -p /c/Users/me/new"}, D_WORK, False, "mkdir Git Bash 写法的 C 盘"),
+    ("windows", "Bash", {"command": "cd /c/Users/me && npm install"}, D_WORK, False, "cd 到 C 盘再装依赖"),
+    ("windows", "Bash", {"command": "git diff HEAD~1"}, D_WORK, True, "HEAD~1 不是家目录"),
+    ("windows", "Bash", {"command": "cmd /c dir"}, D_WORK, True, "cmd /c 不是 C 盘"),
+    # 只读里的文本工具；会写文件的用法照样拦
+    ("windows", "Bash", {"command": "sed -n 1,20p C:/x.txt | sort | uniq -c"}, D_WORK, True, "sed -n | sort | uniq 只读"),
+    ("windows", "Bash", {"command": "sed -i 's/a/b/' C:/x.txt"}, D_WORK, False, "sed -i 改 C 盘"),
+    ("windows", "Bash", {"command": "sort -o C:/out.txt a.txt"}, D_WORK, False, "sort -o 写 C 盘"),
+    ("windows", "Bash", {"command": "uniq a.txt C:/out.txt"}, D_WORK, False, "uniq 第二个参数写文件"),
+    ("windows", "Bash", {"command": "ls C:/ | tee C:/list.txt"}, D_WORK, False, "tee 写 C 盘"),
+    ("windows", "Bash", {"command": "find /c/Users/me -name '*.log' -delete"}, D_WORK, False, "find -delete"),
+    ("windows", "Bash", {"command": "ls `touch C:/x`"}, D_WORK, False, "反引号里可能做任何事"),
+    ("windows", "Bash", {"command": "git -C C:/repo status"}, D_WORK, True, "git -C C 盘 status"),
+    ("windows", "Bash", {"command": "git config --global --get user.name"}, D_WORK, True, "读全局 git 配置"),
+    # 不提路径也写进 C 盘用户目录的命令
+    ("windows", "Bash", {"command": "git config --global user.name x"}, D_WORK, False, "改全局 git 配置"),
+    ("windows", "Bash", {"command": "git config --global --get http.proxy; git clone https://x/r.git D:/w/r"}, D_WORK, True,
+     "git config --global --get 只是读，后面在 D 盘 clone"),
+    ("windows", "Bash", {"command": "pip install requests"}, D_WORK, False, "pip install（装进 C 盘）"),
+    ("windows", "Bash", {"command": "python -m pip install -U pip"}, D_WORK, False, "python -m pip install"),
+    ("windows", "Bash", {"command": "npm i -g typescript"}, D_WORK, False, "npm -g"),
+    ("windows", "Bash", {"command": "setx PATH x"}, D_WORK, False, "setx"),
+    ("windows", "Bash", {"command": "claude mcp add x -- npx y"}, D_WORK, False, "claude mcp add"),
+    ("windows", "Bash", {"command": "pip list && npm ls"}, D_WORK, True, "pip list / npm ls 只读"),
+    ("wsl", "Bash", {"command": "pip install requests"}, "/home/me/proj", True, "WSL：pip install 装在 Linux 里"),
+    # 套了一层壳的命令：拆出里面真正执行的再判断，最多拆两层
+    ("windows", "Bash", {"command": 'bash -c "cd /tmp/x && ls -la"'}, D_WORK, True, "bash -c 里只读"),
+    ("windows", "Bash", {"command": "sh -lc 'cat ~/.bashrc | head'"}, D_WORK, True, "sh -lc 里只读"),
+    ("windows", "Bash", {"command": "bash -c 'echo x > /tmp/a.txt'"}, D_WORK, False, "bash -c 里写 /tmp"),
+    ("windows", "Bash", {"command": "bash /tmp/run.sh"}, D_WORK, False, "bash 跑 C 盘上的脚本"),
+    ("windows", "Bash", {"command": REAL_PS}, D_WORK, True, "真实命令：powershell 查虚拟化信息"),
+    ("windows", "Bash", {"command": 'powershell -NoP -ex Bypass -Command "Get-Content $env:TEMP\\a.log -Tail 20"'}, D_WORK, True,
+     "powershell 缩写参数 + 只读"),
+    ("windows", "Bash", {"command": "pwsh -c Get-ChildItem C:\\Users\\me"}, D_WORK, True, "pwsh -c 不带引号"),
+    ("windows", "Bash", {"command": "cmd /c dir C:\\Users\\me"}, D_WORK, True, "cmd /c dir C 盘"),
+    ("windows", "Bash", {"command": 'cmd /c "del C:\\x.txt"'}, D_WORK, False, "cmd /c del"),
+    ("windows", "Bash", {"command": 'powershell -NoProfile -Command "Remove-Item C:\\x.txt"'}, D_WORK, False, "powershell -Command 里删 C 盘"),
+    ("windows", "Bash", {"command": "powershell -ExecutionPolicy Bypass -File C:\\s.ps1"}, D_WORK, False, "powershell -File"),
+    ("windows", "Bash", {"command": "powershell -WorkingDirectory C:/ -EncodedCommand ZQBjAGgAbwA="}, D_WORK, False,
+     "powershell -EncodedCommand"),
+    ("windows", "Bash", {"command": "bash -c \"bash -c 'sh -c \\\"ls C:/\\\"'\""}, D_WORK, False, "套了三层（只拆两层）"),
+    # PowerShell 按它自己的语法判断：字符串、注释、花括号里的内容不会切乱；藏起来的写操作照样认得出
+    ("windows", "PowerShell", {"command": "$os = Get-CimInstance Win32_OperatingSystem; 'Free GB: ' + "
+                                          "[math]::Round($os.FreePhysicalMemory/1MB,1); Test-Path C:\\Windows"}, D_WORK, True,
+     "PowerShell 变量 + [math] + Test-Path"),
+    ("windows", "PowerShell", {"command": "Get-ChildItem C:\\x | Where-Object { $_.Name -match 'a|b;c' } | ForEach-Object { $_.FullName }"},
+     D_WORK, True, "PowerShell 花括号和引号里的 | ;"),
+    ("windows", "PowerShell", {"command": "if (Test-Path C:\\x) { 'yes' } else { 'no' }  # 看看 C 盘有没有"}, D_WORK, True,
+     "PowerShell if/else + 注释"),
+    ("windows", "PowerShell", {"command": "(Get-Item C:\\Windows).LastWriteTime.AddDays(-1)"}, D_WORK, True, "PowerShell 括号表达式"),
+    ("windows", "PowerShell", {"command": 'powershell -Command "Test-Path C:\\Users\\me\\a.txt"'}, D_WORK, True, "PowerShell 里再套 powershell"),
+    ("windows", "PowerShell", {"command": "Get-ChildItem C:\\x | Select-Object @{n='a';e={Remove-Item $_}}"}, D_WORK, False,
+     "PowerShell 计算属性里藏着 Remove-Item"),
+    ("windows", "PowerShell", {"command": "Get-ChildItem C:\\x | ForEach-Object { $_.Delete() }"}, D_WORK, False, "PowerShell .Delete()"),
+    ("windows", "PowerShell", {"command": "Get-Item C:\\x | ForEach-Object { $_.Attributes = 'Hidden' }"}, D_WORK, False,
+     "PowerShell 给文件对象的属性赋值"),
+    ("windows", "PowerShell", {"command": "[System.IO.File]::WriteAllText('C:\\a.txt', 'x')"}, D_WORK, False,
+     "PowerShell [IO.File]::WriteAllText"),
+    ("windows", "PowerShell", {"command": "Get-Content C:\\a.txt > C:\\b.txt"}, D_WORK, False, "PowerShell > 重定向"),
+    ("windows", "PowerShell", {"command": "& 'C:\\tools\\x.exe' --help"}, D_WORK, False, "PowerShell & 调用程序"),
+    ("windows", "PowerShell", {"command": '"$(Remove-Item C:\\x)"'}, D_WORK, False, 'PowerShell "$(...)" 子表达式'),
+    ("windows", "PowerShell", {"command": "iex (Get-Content C:\\s.ps1 -Raw)"}, D_WORK, False, "PowerShell iex"),
+    ("windows", "PowerShell", {"command": "Get-ChildItem C:\\x | rm"}, D_WORK, False, "PowerShell 管道到 rm 别名"),
+    ("windows", "PowerShell", {"command": "$i = New-Object -ComObject WindowsInstaller.Installer; "
+                                          "$i.InvokeMember('OpenDatabase', 'C:\\a.msi')"}, D_WORK, False, "PowerShell COM 对象调用"),
+    ("windows", "PowerShell", {"command": 'powershell -Command "Set-Content C:\\a.txt x"'}, D_WORK, False,
+     "PowerShell 里再套 powershell 写 C 盘"),
+    ("windows", "PowerShell", {"command": "[System.IO.File]::ReadAllText('C:\\a.txt')"}, D_WORK, True, "PowerShell [IO.File]::ReadAllText"),
+    ("windows", "PowerShell", {"command": "[IO.Directory]::GetFiles('C:\\x') | Measure-Object"}, D_WORK, True,
+     "PowerShell [IO.Directory]::GetFiles"),
+    ("windows", "PowerShell", {"command": "[Environment]::GetFolderPath('Desktop'); Get-ChildItem C:\\x"}, D_WORK, True,
+     "PowerShell [Environment]::GetFolderPath"),
+    ("windows", "PowerShell", {"command": "[System.IO.Path]::GetTempFileName(); Get-ChildItem C:\\x"}, D_WORK, False,
+     "PowerShell GetTempFileName 会建文件"),
+    # 文本工具会写文件、执行命令的用法：yq -i、sed 的 w / e、awk -i inplace / -f、sort --compress-program
+    ("windows", "Bash", {"command": "yq -i '.version=\"2\"' config.yaml"}, C_PROJ, False, "C 盘目录 yq -i"),
+    ("windows", "Bash", {"command": "yq '.version' config.yaml"}, C_PROJ, True, "C 盘目录 yq 读"),
+    ("windows", "Bash", {"command": "sed -n 'w out.txt' in.txt"}, C_PROJ, False, "C 盘目录 sed w"),
+    ("windows", "Bash", {"command": "sed 's/a/b/w out.txt' in.txt"}, C_PROJ, False, "C 盘目录 sed s///w"),
+    ("windows", "Bash", {"command": "sed 's/x/id/e' in.txt"}, C_PROJ, False, "C 盘目录 sed s///e"),
+    ("windows", "Bash", {"command": "sed ':a;e id' in.txt"}, C_PROJ, False, "sed 标签后面跟 e"),
+    ("windows", "Bash", {"command": "sed -f script.sed in.txt"}, C_PROJ, False, "sed -f 脚本看不到"),
+    ("windows", "Bash", {"command": "sed -n '/start/,/end/p; $=' in.txt"}, C_PROJ, True, "sed 地址范围 + 打印"),
+    ("windows", "Bash", {"command": "sed -e 's/hello/world/g' -e '1d' in.txt"}, C_PROJ, True, "sed 替换内容里有 e、w 字母"),
+    ("windows", "Bash", {"command": "sed ':a;N;$!ba;s/\\n/ /g' in.txt"}, C_PROJ, True, "sed 合并行"),
+    ("windows", "Bash", {"command": "sed --sandbox -n 'p' in.txt"}, C_PROJ, True, "sed --sandbox"),
+    ("windows", "Bash", {"command": "awk -F: '{print $1}' a.txt"}, C_PROJ, True, "awk -F 分隔符"),
+    ("windows", "Bash", {"command": "gawk -i inplace '{print}' a.txt"}, C_PROJ, False, "gawk -i inplace"),
+    ("windows", "Bash", {"command": "awk -f prog.awk a.txt"}, C_PROJ, False, "awk -f 程序看不到"),
+    ("windows", "Bash", {"command": "sort --compress-program=gzip big.txt"}, C_PROJ, False, "sort --compress-program"),
+    ("windows", "Bash", {"command": "git diff --output=patch.txt"}, C_PROJ, False, "git diff --output 写文件"),
+    ("windows", "Bash", {"command": "ipconfig /flushdns"}, C_PROJ, False, "ipconfig /flushdns"),
+    ("windows", "Bash", {"command": "ipconfig /all"}, C_PROJ, True, "ipconfig /all"),
+    ("windows", "Bash", {"command": "node --version && npm --version"}, C_PROJ, True, "xxx --version"),
+    ("windows", "Bash", {"command": "C:/tools/x.exe --version"}, D_WORK, False, "带路径的程序 --version"),
     ("wsl", "Bash", {"command": "npm install"}, "/mnt/c/Users/me/proj", False, "WSL：/mnt/c 下装依赖"),
     ("wsl", "Bash", {"command": "npm install"}, "/home/me/proj", True, "WSL：Linux 目录里装依赖"),
     ("wsl", "Write", {"file_path": "/mnt/c/Users/me/a.txt", "content": "x"}, "/home/me", False, "WSL：写 /mnt/c 下的文件"),
     ("posix", "Bash", {"command": "npm install"}, C_PROJ, True, "Linux / macOS 上没有 C 盘规则"),
 ]
-WIN_ENV = {"USERPROFILE": "C:\\Users\\me", "HOME": "C:\\Users\\me"}
+WIN_ENV = {"USERPROFILE": "C:\\Users\\me", "HOME": "C:\\Users\\me", "TEMP": "C:\\Users\\me\\AppData\\Local\\Temp",
+           "TMP": "C:\\Users\\me\\AppData\\Local\\Temp", "APPDATA": "C:\\Users\\me\\AppData\\Roaming",
+           "LOCALAPPDATA": "C:\\Users\\me\\AppData\\Local"}
 
 
 def run(tool, tool_input, mode="on", raw=None, env_extra=None, event_extra=None, raw_out=False):
@@ -398,9 +546,15 @@ def main():
         check(label, allowed == expect, new_log)
     print("— Windows 的 C 盘 —")
     for plat, tool, tool_input, cwd, expect, label in DRIVES:
-        env = dict(WIN_ENV if plat == "windows" else {"HOME": "/home/me"}, AUTO_APPROVE_PLATFORM=plat)
+        # USERPROFILE 也设上：在 Windows 上跑这些用例时，Python 取家目录看的是 USERPROFILE 而不是 HOME
+        env = dict(WIN_ENV if plat == "windows" else {"HOME": "/home/me", "USERPROFILE": "/home/me"}, AUTO_APPROVE_PLATFORM=plat)
         allowed, new_log, _ = run(tool, tool_input, env_extra=env, event_extra={"cwd": cwd})
         check(label, allowed == expect, new_log)
+    allowed, new_log, _ = run("PowerShell", {"command": "Get-ChildItem D:\\x | Where-Object { $_.Length -gt 0 } | "
+                                                        "ForEach-Object { $_.Name }; echo x > D:\\o.txt"},
+                              env_extra=dict(WIN_ENV, AUTO_APPROVE_PLATFORM="windows", _="C:\\Python\\python.exe"),
+                              event_extra={"cwd": D_WORK})
+    check("$_ 是管道变量，不按环境变量查", allowed, new_log)
     print("— Windows 的执行前检查（PreToolUse）—")
     win = dict(WIN_ENV, AUTO_APPROVE_PLATFORM="windows")
     pre = {"hook_event_name": "PreToolUse", "cwd": C_PROJ}
@@ -414,6 +568,10 @@ def main():
     check("开关 off：不插手", not out.strip(), out)
     out = run("Bash", {"command": "rm -rf ~"}, env_extra={"AUTO_APPROVE_PLATFORM": "posix"}, event_extra=pre, raw_out=True)
     check("Linux / macOS：不插手", not out.strip(), out)
+    out = run("Bash", {"command": "echo x > /tmp/a.txt"}, env_extra=win, event_extra=dict(pre, cwd=D_WORK), raw_out=True)
+    check("写 Git Bash 的 /tmp：强制弹窗", '"ask"' in out, out)
+    out = run("Bash", {"command": "pip install requests"}, env_extra=win, event_extra=dict(pre, cwd=D_WORK), raw_out=True)
+    check("装软件（写进 C 盘用户目录）：强制弹窗", '"ask"' in out, out)
     print("— 开关和异常输入 —")
     allowed, new_log, _ = run(*bash("ls"), mode="off")
     check("off：不放行也不记", not allowed and not new_log)
@@ -436,7 +594,7 @@ def main():
     check("带中文的普通命令", allowed)
 
     print()
-    total = len(APPROVE) + len(LEAVE) + len(MODES) + len(DRIVES) + 5 + 9
+    total = len(APPROVE) + len(LEAVE) + len(MODES) + len(DRIVES) + 1 + 7 + 9
     if failures:
         print("失败 %d/%d 项：%s" % (len(failures), total, "、".join(failures)))
         return 1

@@ -152,17 +152,28 @@ Code fed to Python, Node, Ruby, Perl or PHP is treated as data too: heredocs lik
 - Processes, ports, firewalls: `ps`, `ss`, `netstat`, `lsof`, `ufw status`, `iptables -L` / `-S`, `nft list`, `firewall-cmd --list-*`, and `pfctl -s` on macOS
 - Services and logs: `systemctl status`, `journalctl` (except the cleanup options), `dmesg` (without `-c`), and `launchctl list` and `log show` on macOS
 - Containers: `ps`, `images`, `logs`, `inspect`, `info`, `volume ls`, `compose ps` and similar for `docker` / `podman` / `nerdctl`, plus `crictl ps`. Nothing depends on Docker, so machines without it work the same
-- Queries such as `git status`, `git log`, `git diff`, `git show`, `npm ls`, `pip list`, and `xxx --version`
+- Queries such as `git status`, `git log`, `git diff`, `git show`, `npm ls` and `pip list`
 - PowerShell `Get-*`, `Test-*`, `Select-String`, `Select-Object` and similar
 
-Options such as `-u user` and `-n` are understood. Anything that changes something is still stopped, for example `sudo docker rm`, `sudo systemctl restart`, `sudo journalctl --vacuum-time=1d` or `sudo iptables -F`. The full list is `READ_ONLY_COMMANDS` in `auto-approve.py`.
+Options such as `-u user` and `-n` are understood. Anything that changes something is still stopped, for example `sudo docker rm`, `sudo systemctl restart`, `sudo journalctl --vacuum-time=1d` or `sudo iptables -F`.
+
+After sudo the command runs as root, so the forms of these commands that write a file, run another program or change system state are stopped too: `tree -o`, `file -C`, `git log --output`, `git -c key=value` (settings such as `core.fsmonitor` run programs), `git grep -O`, `rg --pre`, `ag --pager`, `date -s`, `hostname newname`, `dmesg -n`, `ss -K`, and `docker config create` (`config` only counts after `compose`). The full list is `SUDO_READ_ONLY` in `auto-approve.py`.
+
+When checking drive C: on Windows, these also count as read-only:
+
+- Text tools: `sort`, `uniq`, `cut`, `tr`, `sed`, `awk`, `jq`, `yq`, `diff` and similar. They are not approved after sudo. Forms that write a file or run a command don't count: `sort -o`, `sort --compress-program`, `sed -i`, `sed -f`, `yq -i`, `yq -s`, awk's `-i inplace`, `-f`, `system()` and `>`, and a second file argument to `uniq`. A `sed` script is also read with sed's own syntax: the `w`, `W` and `e` commands and `s///w` / `s///e` don't count as read-only, while the letters inside a substitution like `s/hello/world/` don't matter
+- `xxx --version` and `xxx --help` for a bare command name. With a path it could be any program, so it doesn't count
 
 **Drive C: on Windows.** On Windows (including `/mnt/c` under WSL), if the current folder is on C:, or a command, file path or MCP argument touches C:, everything except reading needs your confirmation.
 
 - Reading files and searching are approved. A Bash or PowerShell command is approved only if every part of it is a read-only command and nothing is written to a file with `>`.
-- These spellings are recognised: `C:\…`, `C:/…`, Git Bash `/c/…`, WSL `/mnt/c/…`, and `~`, `$HOME`, `$env:USERPROFILE`, `%TEMP%` and other environment variables that point to C:.
+- These spellings are recognised: `C:\…`, `C:/…`, Git Bash `/c/…`, WSL `/mnt/c/…`, and `~`, `$HOME`, `$env:USERPROFILE`, `%TEMP%` and other environment variables that point to C:. Git Bash's `/tmp` is `%TEMP%`, so it counts as C: too. PowerShell's `$_` is the pipeline variable, not an environment variable.
+- Commands that write into your user profile on C: without naming a path count as touching C:: `pip install`, `npm -g`, `git config --global` (except `--get`), `setx`, `reg add`, `winget install`, `claude mcp add` and so on. The full list is `USER_PROFILE_WRITERS`.
+- Wrapped commands are judged by the command inside, up to two levels deep: `bash -c '…'`, `powershell -Command "…"`, `cmd /c …`. `powershell -File`, `-EncodedCommand` and `bash script.sh` hide what they run, so they don't count as read-only.
+- PowerShell is read with its own syntax: text in strings and comments doesn't count; every `Verb-Noun` command anywhere, including inside braces, has to be a reading one such as Get, Test, Select, Where, Sort, Format or Measure, so a delete hidden in `Select-Object @{e={Remove-Item $_}}` is caught; `[IO.File]::WriteAllText`, `.Delete()`, `.InvokeMember()`, assigning to an object's property, `&` calls, `iex` and `"$(…)"` don't count as read-only.
 - Besides answering prompts, the hook registers a pre-execution check (PreToolUse). So even in acceptEdits mode, where Claude Code would edit project files without asking, edits on C: will prompt you.
 - To turn this off, change `PROTECTED_DRIVES = {"C"}` in `auto-approve.py` to `set()` and run `install.py` again. Add drive letters to protect more drives.
+- Only the command text is checked, so writes a program makes on its own can't be seen: `npm install` filling the npm cache on C:, `python install.py` writing to `~/.claude`, a script writing to `%TEMP%`.
 
 **Deletes.** `rm` is not blocked outright. The hook works out each target and only stops the ones you can't undo:
 

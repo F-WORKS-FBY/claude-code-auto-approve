@@ -3,7 +3,7 @@
 
   · 白名单里的工具（Bash/PowerShell 命令、文件编辑/写入、读文件/搜索、网络、MCP/Workflow、Skill）才会自动放行
   · 命令命中黑名单（DENY_PATTERNS）或删除目标危险（dangerous_rm）的，照常弹窗留给你
-  · sudo 后面跟的是只读命令（READ_ONLY_COMMANDS）时放行，其它提权照样留给你
+  · sudo 后面跟的是只读命令（SUDO_READ_ONLY）时放行，其它提权照样留给你
   · Windows（含 WSL）上涉及 C 盘（PROTECTED_DRIVES）的操作，除了读，一律留给你
   · 计划确认（ExitPlanMode）和选择题（AskUserQuestion）永远不碰
   · 放行只对这一次有效，等于点「1 Yes」，不会留下"不再询问"的规则
@@ -74,46 +74,93 @@ EXEC_CALLS = {
 GIT = r"""\bgit(?:\s+(?:-[Cc]\s*(?:(?:[^\s'"]*(?:'[^']*'|"[^"]*"))+[^\s'"]*|\S+)|--[\w-]+(?:=\S+)?))*\s+"""
 END = r"\s*(?=$|[;&|\n)])"   # 这一段命令到此为止，后面没有别的参数
 
-# 只读命令：只看不改。用在两处——
-#   · sudo / doas / gsudo 后面跟的是这些命令时放行（只是借 root 权限查看）；
-#   · Windows 上涉及 C 盘时，只有每一段都是这些命令（而且没有用 > 往文件里写）才放行。
-# 每条是正则，从命令名开始匹配，不区分大小写
-READ_ONLY_COMMANDS = [
+# 只读的 git：只认 -C 路径、--no-pager 这类全局参数。-c 配置项=值 不认——core.fsmonitor、core.pager 这类配置会执行程序
+GIT_READ = (r"""git(?:\s+(?:(?-i:-C)\s*(?:(?:[^\s'"]*(?:'[^']*'|"[^"]*"))+[^\s'"]*|\S+)|(?-i:-P)|--no-pager|--no-optional-locks"""
+            r"""|--git-dir=\S+|--work-tree=\S+))*\s+""")
+
+# 只读命令，分两份。每条是正则，从命令名开始匹配，不区分大小写。
+#
+# SUDO_READ_ONLY：sudo / doas / gsudo 后面跟的是这些命令时放行——这是以 root 身份运行，只放真正只看不改的。
+# 往这里加命令前，先查清它有没有这几类用法，有就用负向断言排除掉：
+#   · 输出到文件：-o、--output、w 命令……（写进 /etc/cron.d 就等于执行命令）
+#   · 执行别的程序：--pre、--pager、--compress-program、e 命令……
+#   · 改系统状态：date -s、hostname 新名字、dmesg -n……
+SUDO_READ_ONLY = [
     # 文件、目录、磁盘、系统信息
-    r"(?:ls|ll|dir|tree|pwd|cd|cat|type|head|tail|less|more|wc|stat|file|du|df|lsblk|free|uptime|whoami|id|uname|hostname|date|which|where|whereis|printenv|echo|printf|true)\b",
-    r"(?:grep|egrep|fgrep|zgrep|zcat|rg|ag|ack|findstr)\b",
+    r"(?:ls|ll|dir|pwd|cd|cat|type|head|tail|less|more|wc|stat|du|df|lsblk|free|uptime|whoami|id|uname|which|where|whereis|printenv|echo|printf|true)\b",
+    r"tree\b(?![^;&|\n]*\s(?-i:-[a-zA-Z]*o)\b)",                                # tree -o：结果写进文件
+    r"file\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*C)|--compile)\b)",                   # file -C：写出编译好的 magic 文件
+    r"date\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*s)|--set)\b)(?![^;&|\n]*\s\d{8,}(?:\.\d\d)?(?=\s|$))",   # date -s / date 0101…：改系统时间
+    r"hostname\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*[Fb])|--file|--boot)\b)(?:\s+-[a-zA-Z]+|\s+--[\w-]+)*" + END,   # 带新名字就是改主机名
+    r"(?:grep|egrep|fgrep|zgrep|zcat|findstr)\b",
+    r"(?:rg|ag|ack)\b(?![^;&|\n]*\s--(?:pre|pager)\b)",                         # --pre / --pager：执行程序
     r"find\b(?![^;&|\n]*\s-(?:delete|exec|execdir|ok|okdir|fprint\w*|fls)\b)",
     # 进程、端口、防火墙、服务、日志（Linux / macOS / Windows）
-    r"(?:ps|pgrep|ss|netstat|lsof|ipconfig|nslookup|dig)\b",
+    r"(?:ps|pgrep|netstat|lsof|nslookup|dig)\b",
+    r"ss\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*K)|--kill)\b)",                        # ss -K：断开连接
+    r"ipconfig\b(?![^;&|\n]*\s[/-](?:release|renew|flushdns|registerdns|setclassid))",
     r"ufw\s+status\b",
-    r"firewall-cmd\s+--(?:state|list|get|query)",
+    r"firewall-cmd\s+--(?:state|list|get|query)(?![^;&|\n]*\s--(?:add|remove|change|set|new|delete|reload|complete-reload|runtime-to-permanent|panic|lockdown)\b)",
     r"ip6?tables(?:-legacy|-nft)?\b(?=[^;&|\n]*\s(?-i:-[a-zA-Z]*[LS]\b|--list\b|--list-rules\b))"
     r"(?![^;&|\n]*\s(?-i:-[a-zA-Z]*[FADIXPZNER]\b|--(?:flush|append|delete|insert|policy|zero|new-chain|rename-chain|replace)\b))",
     r"ip6?tables-save\b",
     r"nft\s+(?:-\S+\s+)*list\b",
-    r"pfctl\s+-s",
+    r"pfctl\s+-s\s*\w+" + END,                                                    # 只认 pfctl -s 类别，后面带 -F 之类的不算
     r"systemctl\s+(?:status|is-active|is-enabled|is-failed|list-\S+|show|cat)\b",
-    r"journalctl\b(?![^;&|\n]*--(?:vacuum|rotate|flush|sync|relinquish))",
-    r"dmesg\b(?![^;&|\n]*\s(?:-[a-zA-Z]*[cC]\b|--clear\b|--read-clear\b))",
+    r"journalctl\b(?![^;&|\n]*--(?:vacuum|rotate|flush|sync|relinquish|setup-keys|update-catalog))",
+    r"dmesg\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*[cCnDE])\b|--(?:clear|read-clear|console-\S+)\b))",   # -c 清空、-n/-D/-E 改控制台日志
     r"launchctl\s+(?:list|print)\b",
     r"log\s+show\b",
-    # 容器的查询：docker / podman / nerdctl / crictl 都认，没装 docker 的机器不受影响
-    r"(?:docker|podman|nerdctl)(?:\s+compose)?\s+(?:ps|ls|images|logs|inspect|info|version|stats|top|port|config|events|history|diff)\b",
+    # 容器的查询：docker / podman / nerdctl / crictl 都认，没装 docker 的机器不受影响。
+    # config 只在 compose 后面认：docker config 本身是管理 swarm 配置的（create / rm）
+    r"(?:docker|podman|nerdctl)\s+(?:ps|images|logs|inspect|info|version|stats|top|port|events|history|diff)\b",
+    r"(?:docker|podman|nerdctl)\s+compose\s+(?:ps|ls|images|logs|top|port|events|version|config\b(?![^;&|\n]*\s(?:(?-i:-o)|--output)\b))\b",
     r"(?:docker|podman|nerdctl)\s+(?:container|image|volume|network|system|context|pod)\s+(?:ls|list|ps|inspect|df|info|logs|top|port)\b",
     r"crictl\s+(?:ps|pods|images|img|inspect\w*|info|logs|stats|version)\b",
-    # git、包管理器的查询
-    GIT.replace(r"\bgit", "git", 1) + r"(?:status|log|diff|show|blame|grep|ls-files|ls-tree|rev-parse|describe|shortlog|cat-file|whatchanged)\b",
-    GIT.replace(r"\bgit", "git", 1) + r"(?:branch|tag|remote)(?:\s+(?:-a|-r|-v+|-l|--list|--all|--remotes|--show-current|--verbose))*" + END,
-    GIT.replace(r"\bgit", "git", 1) + r"(?:stash\s+list|config\s+(?:--get\S*|--list|-l))\b",
+    # git、包管理器的查询。git 的 --output 写文件，git grep -O 用指定的程序打开文件
+    GIT_READ + r"(?:status|log|diff|show|blame|grep|ls-files|ls-tree|rev-parse|describe|shortlog|cat-file|whatchanged)\b"
+    r"(?![^;&|\n]*\s(?:--output\b|(?-i:-O)|--open-files-in-pager\b))",
+    GIT_READ + r"(?:branch|tag|remote)(?:\s+(?:-a|-r|-v+|-l|--list|--all|--remotes|--show-current|--verbose))*" + END,
+    GIT_READ + r"(?:stash\s+list|config(?:\s+--(?:global|system|local|worktree)|\s+--file\s+\S+)*\s+(?:--get\S*|--list|-l))\b",
     r"(?:npm|pnpm|yarn)\s+(?:ls|list|view|info|outdated|why)\b",
     r"(?:pip3?|python3?\s+-m\s+pip)\s+(?:list|show|freeze|check)\b",
-    r"\S+\s+(?:--version|--help)" + END,
-    # PowerShell：Get-* / Test-* 这类只读命令
-    r"(?:Get-\w+|Test-\w+|Resolve-Path|Select-String|Measure-Object|Select-Object|Sort-Object|Where-Object|Format-\w+|Out-String|Write-Output|Write-Host|ConvertTo-\w+|ConvertFrom-\w+|Compare-Object|Group-Object|gci|gc|gi|gp|gps|gsv|gcm|sls|select|sort|measure|ft|fl)\b",
+    # PowerShell：Get-* / Test-* 这类只读命令（sort 在 bash 里是 GNU sort，不放在这里）
+    r"(?:Get-\w+|Test-\w+|Resolve-Path|Select-String|Measure-Object|Select-Object|Sort-Object|Where-Object|Format-\w+|Out-String|Write-Output|Write-Host|ConvertTo-\w+|ConvertFrom-\w+|Compare-Object|Group-Object|gci|gc|gi|gp|gps|gsv|gcm|sls|select|measure|ft|fl)\b",
 ]
+
+# 文本处理工具：读进来、打到屏幕上。只用在 Windows 的 C 盘只读判断里，sudo 后面不放行。
+# 会写文件、执行程序的用法除外：sort -o / --compress-program、yq -i / -s、awk 的 -i inplace / -l / -f / system() / >，
+# uniq / xxd 的第二个文件参数；sed 除了 -i / -f，还会解析脚本，见 sed_safe
+TEXT_READ_ONLY = [
+    r"(?:cut|tr|jq|column|nl|rev|tac|od|hexdump|strings|cmp|diff|comm|paste|fold|basename|dirname|realpath|readlink|cygpath"
+    r"|md5sum|sha\d*sum|cksum|test|false|pushd|popd|tasklist|systeminfo|ver)\b",
+    r"yq\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*[is])\b|--inplace\b|--split-exp\b))",
+    r"sort\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*o)|--output|--compress-program)\b)",
+    r"sed\b(?![^;&|\n]*\s(?:(?-i:-[a-zA-Z]*[if])\b|--in-place\b|--file\b))",
+    r"(?:awk|gawk|mawk|nawk)\b(?![^;&|\n]*(?:\s(?-i:-[a-zA-Z]*[ilfE])\b|\s--(?:include|load|file|exec)\b|system\s*\(|>|\||@load|@include))",
+    r"(?:uniq|xxd)(?:\s+-\S+)*(?:\s+[^\s;&|-]\S*)?" + END,
+]
+
+# Windows 的 C 盘只读判断用的完整清单。另外，不带路径的 xxx --version / --help 也算只读（带路径的可能是任意程序）
+READ_ONLY_COMMANDS = SUDO_READ_ONLY + TEXT_READ_ONLY
+BARE_VERSION = r"[\w.+-]+\s+(?:--version|--help)" + END
 
 # Windows（包括 WSL 里的 /mnt/c）上，涉及这些盘的操作，除了读，一律留给你。不需要就改成 set()
 PROTECTED_DRIVES = {"C"}
+
+# 不提路径也会写进用户目录 / 系统的命令：装软件、改全局配置、改注册表和环境变量。
+# 家目录在受保护的盘上时（Windows 上通常就是 C 盘），这些命令也算涉及受保护的盘
+USER_PROFILE_WRITERS = [
+    r"\b(?:pip3?|python3?(?:\.\d+)?\s+-m\s+pip|py(?:\s+-[\d.]+)?\s+-m\s+pip|uv\s+pip|conda|mamba)\s+(?:install|uninstall|remove|create|update|upgrade)\b",
+    r"\b(?:npm|pnpm|yarn)\b[^;&|\n]*\s(?:-g|--global)\b|\byarn\s+global\b|\b(?:npm|pip)\s+config\s+set\b",
+    r"\b(?:winget|choco|scoop)\s+(?:install|uninstall|upgrade|update|remove)\b",
+    r"\b(?:pipx|cargo|go|gem)\s+install\b|\buv\s+tool\s+install\b|\bdotnet\s+tool\s+install\b",
+    r"\bsetx\b|\breg(?:\.exe)?\s+(?:add|delete|import|copy|restore|load)\b|\bschtasks\b[^;&|\n]*\s/(?:create|delete|change)\b"
+    r"|\bsc(?:\.exe)?\s+(?:create|delete|config)\b",
+    GIT + r"config\b(?![^;&|\n]*\s(?:--get\S*|--list|-l)\b)[^;&|\n]*\s--(?:global|system)\b",   # --get / --list 只是读
+    r"\bclaude\s+(?:config|mcp|plugin)\b",
+    r"\b(?:Set|New|Remove)-ItemProperty\b|\bInstall-(?:Module|Package|Script)\b|SetEnvironmentVariable",
+]
 
 # 黑名单：命令里出现其中一条，就不自动放行（正则，不区分大小写）
 # rm 不在这里一刀切，而是解析出删除目标、只拦"删了就是灾难"的（见 dangerous_path）：
@@ -128,9 +175,9 @@ DENY_PATTERNS = [
     GIT + r"reset\b[^;&|\n]*\s--hard\b",
     GIT + r"clean\b(?![^;&|\n]*\s(?:-[a-zA-Z]*n[a-zA-Z]*|--dry-run)\b)",   # git clean -n（只预览）放行
     GIT + r"stash\s+(?:drop|clear)\b",
-    # 提权：sudo / doas / gsudo 后面跟的不是只读命令（见 READ_ONLY_COMMANDS）就留给你；pkexec、以管理员身份启动一律留给你
+    # 提权：sudo / doas / gsudo 后面跟的不是只读命令（见 SUDO_READ_ONLY）就留给你；pkexec、以管理员身份启动一律留给你
     r"\b(?:sudo|doas|gsudo)\b(?!(?:\s+(?:-(?![A-Za-z]*[ugpCDhrtUT])[A-Za-z]+|-[A-Za-z]*[ugpCDhrtUT]\s*\S+|--[\w-]+(?:=\S+)?|[A-Za-z_]\w*=\S*))*"
-    r"\s+(?:\S*[\\/])?(?:" + "|".join(READ_ONLY_COMMANDS) + r"))",
+    r"\s+(?:\S*[\\/])?(?:" + "|".join(SUDO_READ_ONLY) + r"))",
     r"\bpkexec\b",
     r"\bStart-Process\b[^;&|\n]*\s-Verb\s+RunAs\b",
     r"\b(?:mkfs|fdisk|parted)\b",
@@ -184,7 +231,7 @@ def _platform():
 
 
 PLATFORM = _platform()
-READ_ONLY = re.compile(r"(?:\S*[\\/])?(?:%s)" % "|".join(READ_ONLY_COMMANDS), re.I)
+READ_ONLY = re.compile(r"(?:\S*[\\/])?(?:%s)|%s" % ("|".join(READ_ONLY_COMMANDS), BARE_VERSION), re.I)
 DRIVE_REF = re.compile(r"""(?:^|[\s'"=(,;])(?:([A-Za-z]):(?:[\\/]|(?=[\s'"]|$))|/(?:mnt/)?([A-Za-z])/)""")
 ENV_REF = re.compile(r"\$\{?(?:env:)?(\w+)\}?|%(\w+)%", re.I)
 REDIRECT = re.compile(r"(?<![<>])\d?>>?\s*(?!&\d|>)([^\s;&|]+)")
@@ -432,42 +479,312 @@ def dangerous_rm(cmd, depth=0):
 
 # ---------------------------- Windows 的 C 盘 ----------------------------
 
+SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash"}
+PS_WRAPPERS = {"powershell", "pwsh"}
+# PowerShell 的自动变量（$_ 是管道里的当前对象），不是环境变量，别拿去查环境
+PS_AUTOMATIC = {"_", "null", "true", "false", "args", "input", "this", "psitem", "matches", "error", "host", "lastexitcode", "pid"}
+
+# PowerShell 只读判断：动词-名词形式的命令，只认这些读取类动词 / 命令；别名只认这些
+PS_READ_VERBS = {"get", "test", "select", "where", "sort", "format", "measure", "group", "compare", "convertto",
+                 "convertfrom", "resolve"}
+PS_READ_CMDLETS = {"out-string", "out-host", "out-null", "out-default", "foreach-object", "write-output", "write-host",
+                   "write-verbose", "write-warning", "write-debug", "write-information", "split-path", "join-path",
+                   "set-location", "push-location", "pop-location"}
+PS_READ_ALIASES = {"ls", "dir", "gci", "gc", "cat", "type", "echo", "pwd", "select", "where", "?", "sort", "measure",
+                   "ft", "fl", "fw", "gm", "gp", "gi", "gv", "gal", "gcm", "gcim", "gwmi", "ps", "gps", "gsv", "sls", "%",
+                   "foreach", "cd", "sl", "history", "h"}
+PS_KEYWORDS = {"if", "elseif", "else", "foreach", "for", "while", "do", "until", "switch", "try", "catch", "finally",
+               "return", "break", "continue", "param", "begin", "process", "end", "in", "default"}
+PS_SAFE_TYPES = {"math", "string", "int", "int32", "int64", "long", "double", "decimal", "char", "bool", "datetime",
+                 "timespan", "regex", "convert", "bitconverter", "guid", "version", "uri", "array", "text.encoding"}
+# 文件、目录、路径、环境的静态方法，只认读取的（写入的 Write* / Set* / Delete… 由 PS_WRITE_METHOD 拦下）。
+# Path 的方法都只是拼字符串，只有 GetTempFileName 会真的建一个文件
+PS_READ_STATIC = {
+    "io.file": r"Read\w*|Exists|Get\w*",
+    "io.directory": r"Exists|Get\w*|Enumerate\w*",
+    "io.path": r"(?!GetTempFileName$)\w+",
+    "environment": r"(?!Exit$|FailFast$)\w+",
+}
+PS_WRITE_METHOD = re.compile(r"(?:\.|::)(?:Delete|Create\w*|CopyTo|MoveTo|Move|Copy|Save\w*|Write\w*|Set\w*|Kill|Start|"
+                             r"Invoke\w*|Execute\w*|Open\w*|Append\w*|Remove\w*|Clear|Flush|Install\w*|Uninstall\w*)\s*\(", re.I)
+PS_LEXEME = re.compile(r"""(?P<s>@'.*?'@|@".*?"@|'(?:[^']|'')*'|"(?:[^"`]|`.|"")*")|(?P<c><\#.*?\#>|\#[^\n]*)""", re.S)
+PS_SPLIT = re.compile(r"&&|\|\||[;|{}()\n]")
+
+
+def env_path(name):
+    """环境变量的值；HOME / USERPROFILE 没设时按家目录算"""
+    val = os.environ.get(name) or os.environ.get(name.upper())
+    if not val and name.upper() in ("HOME", "USERPROFILE"):
+        val = HOME
+    return val or ""
+
+
 def on_protected_drive(path):
-    """路径在受保护的盘上：C:\\x、C:/x、Git Bash 的 /c/x、WSL 的 /mnt/c/x"""
+    """路径在受保护的盘上：C:\\x、C:/x、Git Bash 的 /c/x、WSL 的 /mnt/c/x，以及家目录在受保护盘上时的 ~"""
     p = (path or "").strip().strip("\"'").replace("\\", "/")
+    if p.startswith("~"):
+        p = HOME.replace("\\", "/")
     m = re.match(r"([A-Za-z]):(?:/|$)", p) or re.match(r"/(?:mnt/)?([A-Za-z])(?:/|$)", p)
     return bool(m) and m.group(1).upper() in PROTECTED_DRIVES
 
 
 def touches_protected(text, cwd):
-    """当前目录在受保护的盘上，或者文字里出现了指向它的路径、环境变量、~"""
+    """当前目录在受保护的盘上，或者文字里出现了指向它的路径、环境变量、~、Git Bash 的 /tmp。
+    返回第一个命中的写法（写进日志），没有返回 None"""
     if on_protected_drive(cwd):
-        return True
-    if any((m.group(1) or m.group(2)).upper() in PROTECTED_DRIVES for m in DRIVE_REF.finditer(text)):
-        return True
-    if any(on_protected_drive(os.environ.get(m.group(1) or m.group(2), "")) for m in ENV_REF.finditer(text)):
-        return True
-    return bool(re.search(r"""(?:^|[\s'"=])~(?=[\\/\s'"]|$)""", text)) and on_protected_drive(HOME)
+        return "当前目录 %s" % cwd
+    for m in DRIVE_REF.finditer(text):
+        if (m.group(1) or m.group(2)).upper() in PROTECTED_DRIVES:
+            return m.group(0).lstrip(" \t\r\n'\"=(,;")
+    m = re.search(r"file:///([A-Za-z])(?::|%3a)", text, re.I)
+    if m and m.group(1).upper() in PROTECTED_DRIVES:
+        return m.group(0)
+    for m in ENV_REF.finditer(text):
+        name = m.group(1) or m.group(2)
+        if name.lower() in PS_AUTOMATIC and not m.group(0).lower().startswith(("$env:", "${env:")):
+            continue
+        if on_protected_drive(env_path(name)):
+            return m.group(0)
+    if re.search(r"""(?:^|[\s'"=])~(?=[\\/\s'"]|$)""", text) and on_protected_drive(HOME):
+        return "~"
+    if (PLATFORM == "windows" and re.search(r"""(?<![\w./-])/(?:var/)?tmp(?=/|[\s'"`;|&)]|$)""", text)
+            and on_protected_drive(env_path("TEMP") or env_path("TMP"))):
+        return "/tmp"                                   # Git Bash 的 /tmp 就是 %TEMP%，在 C 盘上
+    return None
 
 
 def writes_file(segment):
     """这一段命令有没有用 > / >> 往文件里写（写到 /dev/null、NUL、$null 不算）"""
-    bare = re.sub(r"""'[^']*'|"(?:\\.|[^"\\])*\"""", "", segment)
+    # 引号里的内容换成占位符而不是删掉：> "C:/x.txt" 这种写到带引号路径的，也得认出是在写文件
+    bare = re.sub(r"""'[^']*'|"(?:\\.|[^"\\])*\"""", "Q", segment)
     return any(m.group(1).lower() not in ("/dev/null", "nul", "nul:", "$null") for m in REDIRECT.finditer(bare))
 
 
-def read_only(cmd):
-    """整条命令只是在读：每一段都是只读命令，没有往文件里写，也没有 $(...)"""
+def shell_word(word):
+    """一个 shell 词真正的值：去掉引号，处理双引号里 \\$ \\" 这类转义（bash -c "…" 里真正要执行的命令）"""
+    out, i, n, q = [], 0, len(word), None
+    while i < n:
+        c = word[i]
+        if q == "'":
+            if c == "'":
+                q = None
+            else:
+                out.append(c)
+        elif q == '"':
+            if c == '"':
+                q = None
+            elif c == "\\" and i + 1 < n and word[i + 1] in '$`"\\\n':
+                i += 1
+                out.append(word[i])
+            else:
+                out.append(c)
+        elif c in "'\"":
+            q = c
+        elif c == "\\" and i + 1 < n:
+            i += 1
+            out.append(word[i])
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def ps_opt(arg, name, shortest):
+    """PowerShell 参数名可以缩写：-NoP 就是 -NoProfile，-ex 就是 -ExecutionPolicy"""
+    return len(arg) >= shortest and name.startswith(arg)
+
+
+def wrapped_command(name, args):
+    """bash -c '…'、powershell -Command "…"、cmd /c … 里真正要执行的命令。
+    不是这类写法返回 None；是但看不到要执行什么（-File 脚本、-EncodedCommand、bash 脚本.sh）返回 ''"""
+    if name in SHELL_WRAPPERS:
+        for i, a in enumerate(args):
+            if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a):
+                return args[i + 1] if i + 1 < len(args) else ""
+            if not a.startswith("-"):
+                return ""                               # bash 脚本.sh：跑的是脚本文件
+        return ""
+    if name in PS_WRAPPERS:
+        i = 0
+        while i < len(args):
+            a = args[i].lower()
+            if ps_opt(a, "-command", 2):
+                rest = args[i + 1:]
+                return "" if rest[:1] == ["-"] else " ".join(rest)   # -Command -：从标准输入读，看不到
+            if a in ("-e", "-ec") or ps_opt(a, "-encodedcommand", 3) or ps_opt(a, "-file", 2):
+                return ""
+            if (ps_opt(a, "-executionpolicy", 3) or ps_opt(a, "-windowstyle", 2) or ps_opt(a, "-configurationname", 4)
+                    or ps_opt(a, "-workingdirectory", 3) or a in ("-wd", "-ep", "-of", "-if")
+                    or ps_opt(a, "-outputformat", 2) or ps_opt(a, "-inputformat", 3) or ps_opt(a, "-version", 2)
+                    or ps_opt(a, "-settingsfile", 3) or ps_opt(a, "-psconsolefile", 3)):
+                i += 2                                  # 带值的参数，连值一起跳过
+                continue
+            if a.startswith("-"):
+                i += 1                                  # -NoProfile、-NonInteractive 这类开关
+                continue
+            return " ".join(args[i:])                   # 没写 -Command：剩下的就是命令
+        return ""
+    if name == "cmd":
+        for i, a in enumerate(args):
+            if a.lower() in ("/c", "/k", "/r"):
+                return " ".join(args[i + 1:])
+        return ""
+    return None
+
+
+def ps_read_only(text, depth=0):
+    """一段 PowerShell 是不是只在读。字符串和注释先遮住（长度不变），再看：重定向、.NET 写操作、
+    全文所有 动词-名词 命令（包括花括号里的）、每条语句开头是什么"""
+    if any(m.group("s") and m.group("s")[0] in '"@' and "$(" in m.group("s") for m in PS_LEXEME.finditer(text)):
+        return False                                    # "…$(…)…" 会执行里面的命令
+    masked = PS_LEXEME.sub(lambda m: (m.group(0)[0] + "_" * (len(m.group(0)) - 2) + m.group(0)[-1]) if m.group("s")
+                           else re.sub(r"[^\n]", " ", m.group(0)), text)
+    if ">" in re.sub(r"[\d*]?>&\d|[\d*]?>{1,2}\s*\$null", "", masked):
+        return False                                    # > 文件
+    if PS_WRITE_METHOD.search(masked):
+        return False
+    for m in re.finditer(r"\[([\w.]+)\]\s*::\s*(\w*)", masked):
+        name = m.group(1).lower()
+        name = name[7:] if name.startswith("system.") else name
+        if name in PS_SAFE_TYPES:
+            continue
+        if name in PS_READ_STATIC and re.fullmatch(PS_READ_STATIC[name], m.group(2), re.I):
+            continue                                    # [IO.File]::ReadAllText 这类读取
+        return False
+    for m in re.finditer(r"(?<![\w$.-])([A-Za-z]+)-([A-Za-z]\w*)", masked):
+        if m.group(1).lower() not in PS_READ_VERBS and m.group(0).lower() not in PS_READ_CMDLETS:
+            return False                                # 花括号里藏着的 Remove-Item 之类也算
+    starts = [0] + [m.end() for m in PS_SPLIT.finditer(masked)]
+    ends = [m.start() for m in PS_SPLIT.finditer(masked)] + [len(masked)]
+    for a, b in zip(starts, ends):
+        s = masked[a:b].strip()
+        if not s:
+            continue
+        if s[0] == "&" or re.match(r"\.\s", s):         # & 程序、. 脚本：执行别的东西
+            return False
+        if s[0] in "$'\"@[0123456789-+!,.":
+            if re.match(r"\$[\w:]+(?:\.\w+|\[[^\]]*\])+\s*[-+*/]?=(?!=)", s):
+                return False                            # $_.Attributes = …：给对象的属性赋值，可能改到文件
+            continue
+        m = re.match(r"[^\s=]+", s)
+        if not m:
+            return False
+        first = re.sub(r"(?:\.exe)?$", "", m.group(0).lower())
+        if re.match(r"[A-Za-z]+-[A-Za-z]", first) or re.match(r"\w+\s*=(?!=)", s):
+            continue                                    # 命令已在上面查过；n='…' 是哈希表的键
+        if first in PS_KEYWORDS or first in PS_READ_ALIASES:
+            continue
+        if read_only(text[a:b].strip(), False, depth):  # git status、ipconfig、powershell -Command … 这类
+            continue
+        return False
+    return True
+
+
+def sed_script_safe(script):
+    """一段 sed 脚本里没有会写文件、执行命令的部分：w / W / e 命令，s/// 的 e、w 标志。
+    按 sed 的结构走一遍（地址 → 命令 → 参数），而不是看有没有这几个字母：s/hello/world/ 里的 e、w 只是文字"""
+    s, i, n = script, 0, len(script)
+    while i < n:
+        c = s[i]
+        if c in " \t\r\n;{}!,+~" or c.isdigit() or c == "$":
+            i += 1                                      # 分隔、分组、取反、地址里的数字 / $ / first~step / addr,+N
+            continue
+        if c == "/" or c == "\\":                       # 地址 /正则/ 或 \c正则c
+            delim = "/" if c == "/" else (s[i + 1] if i + 1 < n else "")
+            j = i + (1 if c == "/" else 2)
+            while j < n and s[j] != delim:
+                j += 2 if s[j] == "\\" else 1
+            i = j + 1
+            while i < n and s[i] in "IM":
+                i += 1
+            continue
+        if c in "ewW":
+            return False                                # e 执行命令、w / W 写文件
+        if c in "sy":                                   # s/正则/替换/标志、y/源/目标/
+            d = s[i + 1] if i + 1 < n else ""
+            if not d or d in "\n\\":
+                return False
+            j, parts = i + 2, 0
+            while j < n and parts < 2:
+                if s[j] == "\\":
+                    j += 2
+                    continue
+                parts += s[j] == d
+                j += 1
+            while c == "s" and j < n and s[j] not in ";\n}":
+                if s[j] in "ew":
+                    return False                        # s///e 执行替换结果、s///w 写文件
+                j += 1
+            i = j
+            continue
+        if c in "aic":                                  # a / i / c 后面到行尾都是文字
+            nl = s.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if c in "rRbtTvlLqQ:#":                          # 读文件、跳转、标签、注释：参数到 ; 或行尾
+            j = i + 1
+            while j < n and s[j] not in ("\n" if c in "rR#" else ";\n}"):
+                j += 1
+            i = j
+            continue
+        i += 1                                          # p d n N P D h H g G x = l z F 这类单字母命令
+    return True
+
+
+def sed_safe(args):
+    """sed 的参数里取出脚本（-e 后面的，或者第一个不是选项的参数）逐段检查。
+    带 --sandbox 时 sed 自己会拒绝 e / w / r，算安全；脚本从 -f 文件读的看不到，算不安全"""
+    if "--sandbox" in args:
+        return True
+    scripts, positional, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-e", "--expression") or re.fullmatch(r"-[a-zA-Z]*e", a):
+            scripts.append(args[i + 1] if i + 1 < len(args) else "")
+            i += 2
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a in ("-f", "--file") or a.startswith("--file=") or re.fullmatch(r"-[a-zA-Z]*f\S*", a):
+            return False
+        elif a in ("-l", "--line-length"):
+            i += 1
+        elif not a.startswith("-"):
+            positional.append(a)
+        i += 1
+    if not scripts and positional:
+        scripts = positional[:1]
+    return all(sed_script_safe(x) for x in scripts)
+
+
+def read_only(cmd, powershell=False, depth=0):
+    """整条命令只是在读：每一段都是只读命令，没有往文件里写，也没有 $(...) 和反引号。
+    套了 bash -c / powershell -Command / cmd /c 的，按里面真正执行的命令判断（最多拆两层）；PowerShell 按它自己的语法判断"""
+    if powershell:
+        return ps_read_only(cmd, depth)
     cmd = re.sub(r"[\\`]\r?\n", " ", cmd)
-    if "$(" in cmd:
+    if "$(" in cmd or "`" in cmd:
         return False
     cmd = re.sub(r"\d*>&\d+", " ", cmd)            # 2>&1 只是合并输出，别让 & 把命令切开
     cmd = re.sub(r"&(>>?)", r"\1", cmd)             # &>file 和 >file 一样是写文件
     for raw, words in split_segments(cmd):
+        if writes_file(raw):
+            return False
         plain = [unquote(w) for w in words]
         while plain and ENV_ASSIGN.fullmatch(plain[0]):
             plain.pop(0)
-        if plain and (not READ_ONLY.match(" ".join(plain)) or writes_file(raw)):
+            words = words[1:]
+        if not plain:
+            continue
+        name = re.sub(r"(?:\.exe)?$", "", re.sub(r"^.*[\\/]", "", plain[0]).lower())
+        inner = wrapped_command(name, [shell_word(w) for w in words[1:]])
+        if inner is not None:
+            if not inner.strip() or depth >= 2 or not read_only(inner, name in PS_WRAPPERS, depth + 1):
+                return False
+            continue
+        if not READ_ONLY.match(" ".join(plain)):
+            return False
+        if name == "sed" and not sed_safe(plain[1:]):
             return False
     return True
 
@@ -476,16 +793,21 @@ def protected_write(tool, tool_input, cwd):
     """Windows（含 WSL）上涉及受保护的盘、又不只是读的，返回原因；否则返回 None"""
     if PLATFORM not in ("windows", "wsl") or not PROTECTED_DRIVES:
         return None
-    reason = "Windows：涉及 %s 盘，除了读都要你确认" % "/".join(sorted(PROTECTED_DRIVES))
+    reason = "Windows：涉及 %s 盘「%%s」，除了读都要你确认" % "/".join(sorted(PROTECTED_DRIVES))
     if tool in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         relative = not re.match(r"[A-Za-z]:|[\\/~]", path)
-        return reason if on_protected_drive(path) or (relative and on_protected_drive(cwd)) else None
+        return reason % path if on_protected_drive(path) or (relative and on_protected_drive(cwd)) else None
     if tool in SHELL_TOOLS:
         cmd = tool_input.get("command") if isinstance(tool_input.get("command"), str) else ""
-        return reason if touches_protected(cmd, cwd) and not read_only(cmd) else None
+        hit = touches_protected(cmd, cwd)
+        if not hit and on_protected_drive(HOME):        # pip install、npm -g 这类：不提路径，也写进 C 盘的用户目录
+            m = next((m for m in (re.search(p, cmd, re.I) for p in USER_PROFILE_WRITERS) if m), None)
+            hit = m and re.sub(r"\s+", " ", m.group(0)).strip()
+        return reason % hit if hit and not read_only(cmd, tool == "PowerShell") else None
     if tool.startswith("mcp__"):
-        return reason if touches_protected("\n".join(strings(tool_input)), "") else None
+        hit = touches_protected("\n".join(strings(tool_input)), "")
+        return reason % hit if hit else None
     return None
 
 
