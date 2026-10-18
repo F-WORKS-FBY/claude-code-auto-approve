@@ -58,6 +58,18 @@ CONTENT_KEYS = {"content", "old_string", "new_string", "new_source", "edits"}   
 SEARCH_COMMANDS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr", "select-string", "sls"}
 GIT_SEARCH_SUBCOMMANDS = {"grep", "log", "show", "diff", "blame"}
 
+# 喂给解释器的代码（heredoc、PowerShell 的 @'…'@、-c / -e 后面那段）当数据，不按 shell 命令查——
+# 除非代码里会去执行命令：出现下面这些调用，就整段照常检查
+INTERPRETERS = {"python": "python", "py": "python", "pypy": "python", "node": "node", "nodejs": "node",
+                "bun": "node", "deno": "node", "ruby": "other", "perl": "other", "php": "other"}
+EXEC_CALLS = {
+    "python": r"\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*|startfile|posix_spawn\w*)\b|\bpty\.spawn\b"
+              r"|\bcreate_subprocess_\w+|\bcommands\.get\w+|\b(?:exec|eval)\s*\(|__import__",
+    "node": r"\bchild_process\b|\b(?:exec|execFile|spawn|fork)(?:Sync)?\s*\(|\bDeno\.(?:run|Command)\b|\bBun\.(?:spawn\w*|\$)"
+            r"|\beval\s*\(",
+    "other": r"`|%x|\bqx\b|\b(?:system|exec|spawn|shell_exec|passthru|proc_open|popen|eval)\s*\(|\bOpen3\b|\bIO\.popen\b",
+}
+
 # git 和子命令之间允许出现全局参数，比如 git -C /repo push、git -c k=v push、git --no-pager push
 GIT = r"""\bgit(?:\s+(?:-[Cc]\s*(?:(?:[^\s'"]*(?:'[^']*'|"[^"]*"))+[^\s'"]*|\S+)|--[\w-]+(?:=\S+)?))*\s+"""
 END = r"\s*(?=$|[;&|\n)])"   # 这一段命令到此为止，后面没有别的参数
@@ -255,10 +267,77 @@ def is_search(words):
     return False
 
 
+HEREDOC = re.compile(r"""<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|(\\?)([A-Za-z_][\w.-]*))""")
+HERE_STRING = re.compile(r"""@(['"])\r?\n(.*?)\r?\n\1@([ \t]*\|[ \t]*[^\r\n;|]+)""", re.S)
+INLINE_CODE_FLAGS = {"-c", "-e", "-E", "-r", "-p", "--eval", "--print"}
+
+
+def interpreter(word):
+    """这个词是不是 Python / Node / Ruby / Perl / PHP 这类解释器，是就返回它属于哪一类"""
+    name = re.sub(r"^.*[\\/]", "", unquote(word)).lower()
+    name = re.sub(r"(?:\.exe)?$", "", name)
+    return INTERPRETERS.get(re.sub(r"[\d.]+$", "", name))
+
+
+def inert(code, family, expands):
+    """这段代码不会去执行命令；expands=True 表示 shell 会先展开里面的 $(...) 和反引号"""
+    return not re.search(EXEC_CALLS[family], code) and not (expands and re.search(r"\$\(|`", code))
+
+
+def strip_inert_code(cmd):
+    """把喂给解释器、又不会执行命令的 heredoc 正文和 PowerShell here-string 拿掉，剩下的照常检查"""
+    out, i = "", 0
+    while True:
+        m = HEREDOC.search(cmd, i)
+        line_end = cmd.find("\n", m.end()) if m else -1
+        if not m or line_end < 0:
+            out += cmd[i:]
+            break
+        delim = m.group(2) or m.group(3) or m.group(5)
+        quoted = bool(m.group(2) or m.group(3) or m.group(4))   # <<'EOF' <<"EOF" <<\EOF：shell 不展开正文
+        start = end = line_end + 1
+        while end < len(cmd):                                   # 正文到单独一行的结束标记为止
+            nxt = cmd.find("\n", end)
+            nxt = len(cmd) if nxt < 0 else nxt
+            line = cmd[end:nxt].rstrip("\r")
+            if (line.lstrip("\t") if m.group(1) else line) == delim:
+                break
+            end = nxt + 1
+        end = min(end, len(cmd))
+        before = re.split(r"[;&|]", cmd[cmd.rfind("\n", 0, m.start()) + 1:m.start()])[-1]
+        family = next((f for f in map(interpreter, before.split()) if f), None)
+        body = cmd[start:end]
+        out += cmd[i:start] + ("" if family and inert(body, family, not quoted) else body)
+        i = end
+    def here_string(m):
+        family = next((f for f in map(interpreter, m.group(3).replace("|", " ").split()) if f), None)
+        return "@''@" + m.group(3) if family and inert(m.group(2), family, m.group(1) == '"') else m.group(0)
+    return HERE_STRING.sub(here_string, out)
+
+
+def strip_inline_code(raw, words):
+    """python -c '…'、node -e '…' 这类一行代码，不会执行命令的就从这一段里拿掉"""
+    for i, w in enumerate(words):
+        family = interpreter(w)
+        if not family:
+            continue
+        for j in range(i + 1, len(words) - 1):
+            flag = unquote(words[j])
+            if flag in INLINE_CODE_FLAGS:
+                code = words[j + 1]
+                if inert(quoted_parts(code) or unquote(code), family, not code.startswith("'")):
+                    raw = raw.replace(code, "''", 1)
+                break
+            if not flag.startswith("-"):
+                break
+        break
+    return raw
+
+
 def command_text(cmd):
-    """要拿去查黑名单的命令文字：接上续行，去掉只是在搜索文字的那几段"""
-    cmd = re.sub(r"[\\`]\r?\n", " ", cmd)
-    return "\n".join(raw for raw, words in split_segments(cmd) if not is_search(words))
+    """要拿去查黑名单的命令文字：去掉不会执行命令的解释器代码，接上续行，去掉只是在搜索文字的那几段"""
+    cmd = re.sub(r"[\\`]\r?\n", " ", strip_inert_code(cmd))
+    return "\n".join(strip_inline_code(raw, words) for raw, words in split_segments(cmd) if not is_search(words))
 
 
 # ---------------------------- 删除目标 ----------------------------

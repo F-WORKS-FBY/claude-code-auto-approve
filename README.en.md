@@ -131,6 +131,8 @@ Use the hook with the default or acceptEdits mode. While auto mode is on, auto m
 
 **What gets checked.** Only the command a Bash or PowerShell call will run, and the arguments of MCP tools (an SQL string, for example). Claude's description of the command, file paths and search terms are not checked, so reading a file called `shutdown.ts` doesn't prompt. Segments that only search text (`grep`, `rg`, `git grep`, `git log`) are skipped. Workflow scripts are not checked either, because every step a subagent runs goes through the hook on its own.
 
+Code fed to Python, Node, Ruby, Perl or PHP is treated as data too: heredocs like `python3 - <<'EOF'`, one-liners like `python3 -c '…'`, and PowerShell `@'…'@ | python -`. Words like `sudo` or `rm -rf` inside that code don't prompt. But if the code runs commands, for example through `subprocess`, `os.system`, `child_process`, `system()` or backticks, the whole thing is checked as usual. An unquoted `<<EOF` that contains `$(…)` is checked too, because the shell runs that part first.
+
 **Deny list.** If any of these appear in the command, the call is not approved (case-insensitive):
 
 - `git push` that rewrites or deletes remote history: `-f` (including combinations like `-uf`), `--force`, `--force-with-lease`, `--delete`, `-d`, `--mirror`, `+branch`, `:branch`. A plain push is approved.
@@ -193,7 +195,7 @@ This removes only this hook from `settings.json` and deletes the hook script. Th
 > This is not a sandbox. The rules are regexes plus simple command parsing. They catch an accidental "Yes", not someone working around them on purpose, for example by writing the command into a script first. Use a container or VM if you need real isolation.
 
 - In plan mode, only the plan approval itself is left to you. Claude Code holds back edits and commands in plan mode by prompting, and the hook approves those prompts by its usual rules, so Claude may edit files or run commands before you approve the plan.
-- Quoted text inside a command is checked as a command too, because it may be what `bash -c '…'` runs. So `echo "rm -rf ~"`, or a commit message that mentions `git push -f`, will prompt you. It errs towards asking.
+- Quoted text inside a command is checked as a command too, because it may be what `bash -c '…'` runs. So `echo "rm -rf ~"`, or a commit message that mentions `git push -f`, will prompt you. It errs towards asking. Code fed to an interpreter that doesn't run commands is the exception; see [Rule details](#rule-details).
 - File edits and writes are approved whatever the path, including `~/.claude/settings.json`, `~/.bashrc`, files under `.git/`, and this hook's own mode file. Claude Code's built-in confirmation for these sensitive files is approved too. If that matters to you, block those files with `permissions.deny` in `settings.json`.
 - MCP tools are always approved unless an argument hits the deny list, including tools that send messages or delete remote resources. If that worries you, replace `mcp__.*` in `MATCHER` in `install.py` with the MCP servers you trust.
 - On Windows, if your projects live on C:, the drive C: rule means every step except reading will ask you. To get fewer prompts in day-to-day work, keep projects on another drive.

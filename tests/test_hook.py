@@ -87,6 +87,16 @@ APPROVE = [
     (bash("doas docker ps"), "doas 只读"),
     (ps("sudo netstat -ano"), "Windows：sudo netstat"),
     (ps("gsudo Get-Service"), "Windows：gsudo Get-Service"),
+    # 喂给解释器、又不执行命令的代码当数据：里面的 sudo / rm -rf / DROP TABLE 只是文字
+    (bash('M=~/notes; python3 -I - "$M" <<\'PYEOF\'\nimport os, re, sys\n'
+          'edit("infra", [(lambda t: re.sub(r"x", "本机有 docker，但不在 docker 组（每条要 sudo）；`rm -rf ~` 别用", t), None)])\n'
+          'print("git push --force 会改写历史")\nPYEOF'), "Python heredoc 写备忘（文字里有 sudo）"),
+    (bash("cd /srv && python3 - <<'EOF'\nimport json\nprint('DROP TABLE users')\nEOF"), "Python heredoc 打印 DROP TABLE"),
+    (bash("python3 -c \"print('rm -rf ~ is dangerous')\""), "python -c 里的文字"),
+    (bash("uv run python -c 'print(\"sudo reboot\")'"), "uv run python -c"),
+    (bash("node -e \"console.log('git push --force')\""), "node -e 里的文字"),
+    (bash("ruby -e 'puts \"sudo shutdown\"'"), "ruby -e 里的文字"),
+    (ps("@'\nprint(\"sudo apt install x\")\n'@ | python -"), "PowerShell here-string 喂给 python"),
     # 只看工具类型的
     (("Bash", {"command": "ls", "description": "no sudo needed"}), "说明里提到 sudo"),
     (("Edit", {"file_path": "/home/ubuntu/a.py", "old_string": "x", "new_string": "sudo rm -rf /"}), "编辑内容不查黑名单"),
@@ -162,6 +172,18 @@ LEAVE = [
     (bash("pkexec rm /etc/x"), "pkexec"),
     (ps("gsudo Remove-Item C:\\x"), "gsudo（Windows）"),
     (ps("Start-Process powershell -Verb RunAs"), "以管理员身份运行"),
+    # 解释器代码里会去执行命令的，照常检查
+    (bash("python3 - <<'EOF'\nimport subprocess\nsubprocess.run('sudo rm -rf /srv', shell=True)\nEOF"), "Python heredoc 里 subprocess"),
+    (bash("python3 -c \"import os; os.system('rm -rf ~')\""), "python -c 里 os.system"),
+    (bash("python3 - <<'EOF'\n__import__('os').system('rm -rf ~')\nEOF"), "Python heredoc 里 __import__"),
+    (bash("node -e \"require('child_process').execSync('git push -f')\""), "node -e 里 child_process"),
+    (bash("ruby -e 'system(\"sudo reboot\")'"), "ruby -e 里 system()"),
+    (bash("perl -e '`rm -rf ~`'"), "perl 里反引号"),
+    (bash("python3 - <<EOF\nprint(\"$(sudo rm -rf /x/y)\")\nEOF"), "不带引号的 heredoc 里 $(...)"),
+    (bash("bash <<'EOF'\nsudo rm -rf /srv\nEOF"), "喂给 bash 的 heredoc"),
+    (bash("cat > x.sh <<'EOF'\nsudo reboot\nEOF"), "写进文件的 heredoc"),
+    (bash("sudo python3 - <<'EOF'\nprint(1)\nEOF"), "sudo python3"),
+    (ps("@'\nimport subprocess; subprocess.run('sudo reboot')\n'@ | python -"), "PowerShell here-string 里 subprocess"),
     (bash("mkfs.ext4 /dev/vdb"), "mkfs"),
     (bash("dd if=/dev/zero of=/dev/vda"), "dd 写盘"),
     (bash("dd bs=4M if=ubuntu.iso of=/dev/sdb status=progress"), "dd 参数顺序不同"),
@@ -299,6 +321,7 @@ DRIVES = [
     ("windows", "Bash", {"command": "mkdir build"}, C_PROJ, False, "C 盘目录里 mkdir"),
     ("windows", "Bash", {"command": "python script.py"}, C_PROJ, False, "C 盘目录里跑脚本"),
     ("windows", "Bash", {"command": "ls $(pwd)"}, C_PROJ, False, "带 $(...) 不算只读"),
+    ("windows", "Bash", {"command": "python3 - <<'EOF'\nprint('hi')\nEOF"}, C_PROJ, False, "C 盘目录里跑 Python 脚本"),
     ("windows", "PowerShell", {"command": "Get-ChildItem | Select-Object Name"}, C_PROJ, True, "PowerShell 查看"),
     ("windows", "PowerShell", {"command": "Get-Content a.txt | Out-File b.txt"}, C_PROJ, False, "PowerShell Out-File 写文件"),
     ("windows", "PowerShell", {"command": "Set-Content a.txt hi"}, C_PROJ, False, "PowerShell Set-Content"),
